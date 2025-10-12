@@ -219,6 +219,8 @@ local function tweenPath()
     end
     
     local idx = nearestIndex(Root.Position)
+    local RUBBER_TELEPORT_DIST = 15
+    local RUBBER_SETTLE_TIME = 0.3
     
     while state.tween do
         if not Root or not Root.Parent then
@@ -233,7 +235,8 @@ local function tweenPath()
         end
         
         local target = Vector3.new(pos.X, pos.Y, pos.Z)
-        local dist = (Root.Position - target).Magnitude
+        local startPos = Root.Position
+        local dist = (startPos - target).Magnitude
         local duration = dist / settings.tweenSpeed
         
         if connections.tween then
@@ -242,11 +245,59 @@ local function tweenPath()
         
         local info = TweenInfo.new(duration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
         connections.tween = TweenService:Create(Root, info, {CFrame = CFrame.new(target)})
+        
+        local completed = false
+        local rubberbanded = false
+        
+        local conn
+        conn = connections.tween.Completed:Connect(function()
+            completed = true
+            if conn then conn:Disconnect() end
+        end)
+        
         connections.tween:Play()
-        connections.tween.Completed:Wait()
+        
+        local lastPos = startPos
+        local t0 = tick()
+        
+        while state.tween and not completed do
+            task.wait(0.1)
+            
+            local curPos = Root.Position
+            local stepDist = (curPos - lastPos).Magnitude
+            
+            if stepDist >= RUBBER_TELEPORT_DIST then
+                rubberbanded = true
+                break
+            end
+            
+            local elapsed = tick() - t0
+            local alpha = math.clamp(elapsed / duration, 0, 1)
+            local expectPos = startPos:Lerp(target, alpha)
+            local deviation = (curPos - expectPos).Magnitude
+            
+            if deviation >= 8 then
+                rubberbanded = true
+                break
+            end
+            
+            lastPos = curPos
+        end
+        
+        if conn then conn:Disconnect() end
+        if connections.tween then connections.tween:Cancel() end
+        
+        if rubberbanded then
+            warn("Rubberband detected! Repositioning...")
+            task.wait(RUBBER_SETTLE_TIME)
+            idx = nearestIndex(Root.Position)
+            Root.Anchored = false
+            task.wait(0.1)
+            continue
+        end
         
         idx = idx % #settings.positions + 1
-        task.wait(settings.waitTime)
+        task.wait(0.01)
     end
 end
 
