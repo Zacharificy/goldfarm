@@ -83,6 +83,7 @@ local function hitResources()
 end
 
 local function noclip()
+    -- Handle doors
     for _, v in workspace.Deployables:GetChildren() do
         local door = v:FindFirstChild("Door")
         if door then
@@ -90,10 +91,21 @@ local function noclip()
             door.CanCollide = not state.noclip
         end
     end
-    if state.noclip then
+    
+    -- Handle Old Boards - only when NOT tweening to prevent conflicts
+    if state.noclip and not state.tween then
         for _, v in workspace.Resources:GetChildren() do
             if v.Name == "Old Boards" then
                 v:Destroy()
+            end
+        end
+    end
+    
+    -- Make character parts non-collidable during noclip
+    if state.noclip and Character then
+        for _, part in ipairs(Character:GetDescendants()) do
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                part.CanCollide = false
             end
         end
     end
@@ -207,8 +219,17 @@ local function tweenPath()
     end
     
     local idx = nearestIndex(Root.Position)
-    local RUBBER_TELEPORT_DIST = 15
-    local RUBBER_SETTLE_TIME = 0.3
+    local RUBBER_TELEPORT_DIST = 20
+    local RUBBER_SETTLE_TIME = 0.5
+    
+    -- Make character non-collidable during tween for smooth movement
+    if state.noclip and Character then
+        for _, part in ipairs(Character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
+        end
+    end
     
     while state.tween do
         if not Root or not Root.Parent then
@@ -231,7 +252,10 @@ local function tweenPath()
             connections.tween:Cancel()
         end
         
-        local info = TweenInfo.new(duration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+        -- Set HumanoidRootPart to Massless and adjust anchoring
+        Root.Massless = true
+        
+        local info = TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut)
         connections.tween = TweenService:Create(Root, info, {CFrame = CFrame.new(target)})
         
         local completed = false
@@ -251,6 +275,8 @@ local function tweenPath()
         while state.tween and not completed do
             task.wait(0.1)
             
+            if not Root or not Root.Parent then break end
+            
             local curPos = Root.Position
             local stepDist = (curPos - lastPos).Magnitude
             
@@ -264,7 +290,7 @@ local function tweenPath()
             local expectPos = startPos:Lerp(target, alpha)
             local deviation = (curPos - expectPos).Magnitude
             
-            if deviation >= 8 then
+            if deviation >= 12 then
                 rubberbanded = true
                 break
             end
@@ -277,16 +303,21 @@ local function tweenPath()
         
         if rubberbanded then
             warn("Rubberband detected! Repositioning...")
+            Root.Massless = false
             task.wait(RUBBER_SETTLE_TIME)
             idx = nearestIndex(Root.Position)
             Root.Anchored = false
-            task.wait(0.1)
+            task.wait(0.2)
+            Root.Massless = true
             continue
         end
         
         idx = idx % #settings.positions + 1
-        task.wait(0.01)
+        task.wait(settings.waitTime)
     end
+    
+    -- Restore default physics
+    Root.Massless = false
 end
 
 local gui = Instance.new("ScreenGui")
@@ -636,6 +667,7 @@ toggle("Position Tween", "🧭", function(on)
         if connections.tween then
             connections.tween:Cancel()
         end
+        Root.Massless = false
     end
 end)
 
