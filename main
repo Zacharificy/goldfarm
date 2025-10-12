@@ -213,13 +213,13 @@ local function autoEat()
     end
 end
 
--- Pickup items (OPTIMIZED - won't interfere with TP system)
+-- Pickup items (FIXED - Uses better method from immortal.tech)
 local pickupDebounce = {}
 local function pickup(itemName)
     while (itemName == "Raw Gold" and state.pickupGold) or (itemName == "Coal" and state.pickupCoal) do
-        local items = Workspace:FindFirstChild("Items")
-        if items then
-            for _, item in ipairs(items:GetChildren()) do
+        local ItemsFolder = Workspace:FindFirstChild("Items")
+        if ItemsFolder then
+            for _, item in ipairs(ItemsFolder:GetChildren()) do
                 -- Skip Raw Gold if TP system is active (let TP handle it)
                 if item.Name == itemName and not pickupDebounce[item] then
                     if itemName == "Raw Gold" and state.tpRawGoldToChest then
@@ -227,24 +227,24 @@ local function pickup(itemName)
                     end
                     
                     pickupDebounce[item] = true
+                    local t0 = os.clock()
                     local id = item:GetAttribute("EntityID")
-                    local t = os.clock()
-                    while not id and item.Parent == items and os.clock() - t < 1 do
-                        task.wait(0.03)
+                    while item.Parent == ItemsFolder and not id and os.clock() - t0 < 3 do
+                        task.wait(0.05)
                         id = item:GetAttribute("EntityID")
                     end
                     if id then
-                        for i = 1, 10 do
-                            if not item or item.Parent ~= items then break end
+                        for i = 1, 8 do
+                            if not item or item.Parent ~= ItemsFolder then break end
                             Packets.Pickup.send(id)
-                            task.wait(0.025)
+                            task.wait(0.12)
                         end
                     end
-                    task.delay(0.8, function() pickupDebounce[item] = nil end)
+                    task.delay(1, function() pickupDebounce[item] = nil end)
                 end
             end
         end
-        task.wait(0.04)
+        task.wait(0.25)
     end
 end
 
@@ -356,12 +356,10 @@ local function campfireRefuelLoop()
     end
 end
 
--- TP Raw Gold to Chest - Fully automatic with drop (ULTRA FAST & OPTIMIZED)
+-- TP Raw Gold to Chest - Fully automatic with drop (BALANCED & INSTANT)
 local tpRawGoldRunning = false
-local lastDropTime = 0
 local function tpRawGoldLoop()
     tpRawGoldRunning = true
-    local tpDebounce = {}
     
     while state.tpRawGoldToChest and tpRawGoldRunning do
         if not chest or not chest.Parent then
@@ -373,61 +371,62 @@ local function tpRawGoldLoop()
             end
         end
         
-        -- TP any existing dropped Raw Gold IMMEDIATELY (but only ones we dropped)
-        local items = Workspace:FindFirstChild("Items")
-        if items then
-            for _, item in ipairs(items:GetChildren()) do
-                if item.Name == "Raw Gold" and item.Parent == items and not tpDebounce[item] then
-                    -- Check if this was recently dropped by us
-                    local itemAge = tick() - (item:GetAttribute("SpawnTime") or 0)
-                    if itemAge < 2 or tick() - lastDropTime < 2 then
-                        tpDebounce[item] = true
-                        local id = item:GetAttribute("EntityID")
-                        
-                        -- Quick wait for EntityID
-                        if not id then
-                            local t0 = os.clock()
-                            while not id and item.Parent == items and os.clock() - t0 < 0.15 do
-                                task.wait(0.01)
-                                id = item:GetAttribute("EntityID")
-                            end
-                        end
-                        
-                        if id then
-                            Packets.ForceInteract.send(id)
-                            task.wait(0.01)
-                            
-                            pcall(function()
-                                if item and item.Parent == items and chest and chest.Parent then
-                                    item:PivotTo(chest:GetPivot() * CFrame.new(0, 2, 0))
-                                end
-                            end)
-                            
-                            task.wait(0.01)
-                            Packets.ForceInteract.send()
-                        end
-                        
-                        task.delay(0.5, function() tpDebounce[item] = nil end)
-                    end
-                end
-            end
-        end
+        local chestPos = chest:GetPivot()
         
-        -- Drop 3 Raw Gold at once for speed
+        -- Drop 1 Raw Gold at a time for balance
         local inventory = GameUtil.getData().inventory
         for idx, data in pairs(inventory) do
             if data.name == "Raw Gold" and data.quantity > 0 then
-                local dropAmount = math.min(3, data.quantity)
-                for i = 1, dropAmount do
-                    Packets.DropBagItem.send(idx, 1)
-                    task.wait(0.008)
+                Packets.DropBagItem.send(idx, 1)
+                
+                -- Wait for it to spawn and TP it INSTANTLY
+                task.wait(0.1)
+                
+                local items = Workspace:FindFirstChild("Items")
+                if items then
+                    for _, item in ipairs(items:GetChildren()) do
+                        if item.Name == "Raw Gold" and item.Parent == items then
+                            local id = item:GetAttribute("EntityID")
+                            
+                            -- Wait for EntityID
+                            local attempts = 0
+                            while not id and item.Parent == items and attempts < 15 do
+                                task.wait(0.01)
+                                id = item:GetAttribute("EntityID")
+                                attempts = attempts + 1
+                            end
+                            
+                            if id and item.Parent == items and chest and chest.Parent then
+                                -- Get network ownership
+                                Packets.ForceInteract.send(id)
+                                task.wait(0.02)
+                                
+                                -- Teleport to chest INSTANTLY
+                                pcall(function()
+                                    if item and item.Parent == items then
+                                        item:PivotTo(chestPos * CFrame.new(0, 2, 0))
+                                    end
+                                end)
+                                
+                                task.wait(0.02)
+                                
+                                -- Release ownership
+                                Packets.ForceInteract.send()
+                                
+                                -- Only TP the first one we find then drop next
+                                break
+                            end
+                        end
+                    end
                 end
-                lastDropTime = tick()
+                
+                -- Small delay before next drop
+                task.wait(0.05)
                 break
             end
         end
         
-        task.wait(0.04)
+        task.wait(0.05)
     end
     tpRawGoldRunning = false
 end
@@ -463,7 +462,7 @@ local function pickupGoldFromChestLoop()
     end
 end
 
--- Pickup coins from press
+-- Pickup coins from press (OPTIMIZED)
 local function pickupCoinsLoop()
     while state.pickupCoins do
         local items = Workspace:FindFirstChild("Items")
@@ -473,22 +472,22 @@ local function pickupCoinsLoop()
                     pickupDebounce[item] = true
                     local id = item:GetAttribute("EntityID")
                     local t = os.clock()
-                    while not id and item.Parent == items and os.clock() - t < 1.5 do
-                        task.wait()
+                    while not id and item.Parent == items and os.clock() - t < 1 do
+                        task.wait(0.03)
                         id = item:GetAttribute("EntityID")
                     end
                     if id then
-                        for i = 1, 12 do
+                        for i = 1, 10 do
                             if not item or item.Parent ~= items then break end
                             Packets.Pickup.send(id)
-                            task.wait(0.03)
+                            task.wait(0.025)
                         end
                     end
-                    task.delay(1, function() pickupDebounce[item] = nil end)
+                    task.delay(0.8, function() pickupDebounce[item] = nil end)
                 end
             end
         end
-        task.wait(0.05)
+        task.wait(0.04)
     end
 end
 
