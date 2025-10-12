@@ -1,1 +1,745 @@
+-- Gold Tweens Hub for Booga Booga
+-- Load config from external GitHub file
 
+local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local RS = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local Humanoid = Character:WaitForChild("Humanoid")
+local Root = Character:WaitForChild("HumanoidRootPart")
+
+-- Required modules
+local Packets = require(RS.Modules.Packets)
+local GameUtil = require(RS.Modules.GameUtil)
+local ItemIDS = require(RS.Modules.ItemIDS)
+local ItemData = require(RS.Modules.ItemData)
+
+-- Load configuration from GitHub
+local DEFAULT_CONFIG
+local success, config = pcall(function()
+    return loadstring(game:HttpGet("https://raw.githubusercontent.com/Zacharificy/goldfarm/main/tweens"))()
+end)
+
+if success and config then
+    DEFAULT_CONFIG = config
+    print("✅ Tween config loaded successfully from GitHub! (" .. #config.positions .. " positions)")
+else
+    -- Fallback to empty config if loading fails
+    warn("❌ Failed to load config from GitHub, using empty fallback")
+    DEFAULT_CONFIG = {
+        ["waitTime"] = 1,
+        ["heightOffset"] = 0,
+        ["moveSpeed"] = 20,
+        ["positions"] = {}
+    }
+end
+
+-- Feature states
+local autoHitEnabled = false
+local noclipEnabled = false
+local autoEatEnabled = false
+local tweenEnabled = false
+local pickupRawGoldEnabled = false
+local pickupCoalEnabled = false
+
+local hitRadius = 100
+local selectedFruit = "Bloodfruit"
+local tweenSpeed = DEFAULT_CONFIG.moveSpeed or 20
+local waitTime = DEFAULT_CONFIG.waitTime or 0.1
+local positions = DEFAULT_CONFIG.positions or {}
+
+local currentTween = nil
+local autoHitConnection = nil
+local noclipConnection = nil
+local autoEatLoop = nil
+local pickupRawGoldTask = nil
+local pickupCoalTask = nil
+
+local HUNGER_CAP = 100
+local EAT_AT_OR_BELOW = 90
+local LOOP_WAIT_SECONDS = 1
+local POST_EAT_COOLDOWN = 2.0
+local lastEatTime = 0
+
+-- Fruit options (from ItemData)
+local fruitOptions = {}
+for x, v in pairs(ItemData) do
+    if v.grows then
+        table.insert(fruitOptions, x)
+    end
+end
+table.sort(fruitOptions)
+
+-- Add default if list is empty
+if #fruitOptions == 0 then
+    fruitOptions = {"Bloodfruit", "Strawberry", "Berries", "Cloudberry", "Prickly Pear", "Lemon"}
+end
+
+-- Character update
+LocalPlayer.CharacterAdded:Connect(function(char)
+    Character = char
+    Humanoid = char:WaitForChild("Humanoid")
+    Root = char:WaitForChild("HumanoidRootPart")
+end)
+
+-- Auto Hit Resources Function
+local function interactWithNearbyResources()
+    if not autoHitEnabled then return end
+    
+    local nearbyEntities = {}
+    for _, resource in ipairs(Workspace.Resources:GetChildren()) do
+        local distance = (Root.Position - resource:GetPivot().Position).Magnitude
+        if distance <= hitRadius then
+            local entityID = resource:GetAttribute("EntityID")
+            if entityID then
+                table.insert(nearbyEntities, entityID)
+            end
+        end
+    end
+    
+    if #nearbyEntities > 0 then
+        Packets.SwingTool.send(nearbyEntities)
+    end
+end
+
+-- Noclip Function
+local function noclipDoors()
+    for _, v in workspace.Deployables:GetChildren() do
+        if v:FindFirstChild("Door") then
+            v.Door.Transparency = noclipEnabled and 0.5 or 0
+            v.Door.CanCollide = not noclipEnabled
+        end
+    end
+    for _, v in workspace.Resources:GetChildren() do
+        if v.Name == "Old Boards" then
+            if noclipEnabled then
+                v:Destroy()
+            end
+        end
+    end
+end
+
+-- Auto Eat Function
+local function findFruitIndex(fruitName)
+    for index, data in next, GameUtil.getData().inventory do
+        if data.name == fruitName then
+            return index
+        end
+    end
+    return nil
+end
+
+local function getFruitRestoreAmount(nameOrId)
+    local id = ItemIDS[nameOrId] or nameOrId
+    local data = ItemData[id] or (ItemIDS[id] and ItemData[ItemIDS[id]])
+    if not data then return nil end
+    
+    return data.food or data.hunger or data.restore or data.restoreValue or data.heal or nil
+end
+
+local function getHunger()
+    local stats = GameUtil and GameUtil.Data and GameUtil.Data.stats
+    return stats and stats.food or nil
+end
+
+local function canEatNow()
+    return (tick() - lastEatTime) >= POST_EAT_COOLDOWN
+end
+
+local function eatFruitOnce(idx)
+    Packets.UseBagItem.send(idx)
+    lastEatTime = tick()
+end
+
+local function willOvereat(currentHunger, restore)
+    if not restore then return false end
+    return (currentHunger + restore) > HUNGER_CAP
+end
+
+local function autoEatLoop()
+    while autoEatEnabled do
+        local current = getHunger()
+        
+        if not selectedFruit then
+            warn("No fruit selected for auto-eat.")
+        elseif not current then
+            warn("Hunger value unavailable right now.")
+        else
+            if current <= EAT_AT_OR_BELOW and canEatNow() then
+                local fruitIndex = findFruitIndex(selectedFruit)
+                if fruitIndex then
+                    local restore = getFruitRestoreAmount(selectedFruit)
+                    
+                    if restore and willOvereat(current, restore) then
+                        -- Skip eating to avoid overeating
+                    else
+                        eatFruitOnce(fruitIndex)
+                    end
+                else
+                    warn("Selected fruit not found in inventory: " .. tostring(selectedFruit))
+                end
+            end
+        end
+        
+        task.wait(LOOP_WAIT_SECONDS)
+    end
+end
+
+-- Pickup Raw Gold Function
+local function pickupRawGolds()
+    while pickupRawGoldEnabled do
+        local ItemsFolder = Workspace:FindFirstChild("Items")
+        if ItemsFolder then
+            for _, item in ipairs(ItemsFolder:GetChildren()) do
+                if item.Name == "Raw Gold" then
+                    local t0 = os.clock()
+                    local id = item:GetAttribute("EntityID")
+                    while item.Parent == workspace.Items and not id and os.clock() - t0 < 3 do
+                        task.wait()
+                        id = item:GetAttribute("EntityID")
+                    end
+                    if id then
+                        for i = 1, 8 do
+                            if not item or item.Parent ~= workspace.Items then break end
+                            Packets.Pickup.send(id)
+                            task.wait(0.12)
+                        end
+                    end
+                end
+            end
+        end
+        task.wait(0.25)
+    end
+end
+
+-- Pickup Coal Function
+local function pickupCoal()
+    while pickupCoalEnabled do
+        local ItemsFolder = Workspace:FindFirstChild("Items")
+        if ItemsFolder then
+            for _, item in ipairs(ItemsFolder:GetChildren()) do
+                if item.Name == "Coal" then
+                    local t0 = os.clock()
+                    local id = item:GetAttribute("EntityID")
+                    while item.Parent == workspace.Items and not id and os.clock() - t0 < 3 do
+                        task.wait()
+                        id = item:GetAttribute("EntityID")
+                    end
+                    if id then
+                        for i = 1, 8 do
+                            if not item or item.Parent ~= workspace.Items then break end
+                            Packets.Pickup.send(id)
+                            task.wait(0.12)
+                        end
+                    end
+                end
+            end
+        end
+        task.wait(0.25)
+    end
+end
+
+-- Tween Movement Function
+local function startTweening()
+    if #positions == 0 then
+        warn("No positions loaded! Check your config file.")
+        tweenEnabled = false
+        return
+    end
+    
+    local currentIndex = 1
+    
+    while tweenEnabled do
+        if not Root or not Root.Parent then
+            task.wait(1)
+            continue
+        end
+        
+        local pos = positions[currentIndex]
+        if not pos then
+            currentIndex = 1
+            continue
+        end
+        
+        local targetPos = Vector3.new(pos.X, pos.Y, pos.Z)
+        local distance = (Root.Position - targetPos).Magnitude
+        local duration = distance / tweenSpeed
+        
+        if currentTween then
+            currentTween:Cancel()
+        end
+        
+        local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
+        currentTween = TweenService:Create(Root, tweenInfo, {CFrame = CFrame.new(targetPos)})
+        
+        currentTween:Play()
+        currentTween.Completed:Wait()
+        
+        task.wait(waitTime)
+        
+        currentIndex = currentIndex + 1
+        if currentIndex > #positions then
+            currentIndex = 1
+        end
+    end
+end
+
+-- Create GUI
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "GoldTweensHub"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = game.CoreGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 400, 0, 500)
+MainFrame.Position = UDim2.new(0.5, -200, 0.5, -250)
+MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 12)
+UICorner.Parent = MainFrame
+
+-- Header
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 50)
+Header.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
+Header.BorderSizePixel = 0
+Header.Parent = MainFrame
+
+local HeaderCorner = Instance.new("UICorner")
+HeaderCorner.CornerRadius = UDim.new(0, 12)
+HeaderCorner.Parent = Header
+
+local HeaderFix = Instance.new("Frame")
+HeaderFix.Size = UDim2.new(1, 0, 0, 12)
+HeaderFix.Position = UDim2.new(0, 0, 1, -12)
+HeaderFix.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
+HeaderFix.BorderSizePixel = 0
+HeaderFix.Parent = Header
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -20, 1, 0)
+Title.Position = UDim2.new(0, 10, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Gold Tweens Hub"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextSize = 24
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Header
+
+-- Close Button
+local CloseButton = Instance.new("TextButton")
+CloseButton.Size = UDim2.new(0, 30, 0, 30)
+CloseButton.Position = UDim2.new(1, -40, 0, 10)
+CloseButton.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
+CloseButton.Text = "X"
+CloseButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseButton.TextSize = 18
+CloseButton.Font = Enum.Font.GothamBold
+CloseButton.Parent = Header
+
+local CloseCorner = Instance.new("UICorner")
+CloseCorner.CornerRadius = UDim.new(0, 6)
+CloseCorner.Parent = CloseButton
+
+CloseButton.MouseButton1Click:Connect(function()
+    ScreenGui:Destroy()
+end)
+
+-- Scroll Frame for content
+local ScrollFrame = Instance.new("ScrollingFrame")
+ScrollFrame.Size = UDim2.new(1, -20, 1, -70)
+ScrollFrame.Position = UDim2.new(0, 10, 0, 60)
+ScrollFrame.BackgroundTransparency = 1
+ScrollFrame.BorderSizePixel = 0
+ScrollFrame.ScrollBarThickness = 6
+ScrollFrame.Parent = MainFrame
+
+local UIListLayout = Instance.new("UIListLayout")
+UIListLayout.Padding = UDim.new(0, 10)
+UIListLayout.Parent = ScrollFrame
+
+-- Helper function to create toggle
+local function createToggle(name, icon, callback)
+    local ToggleFrame = Instance.new("Frame")
+    ToggleFrame.Size = UDim2.new(1, 0, 0, 60)
+    ToggleFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    ToggleFrame.BorderSizePixel = 0
+    ToggleFrame.Parent = ScrollFrame
+    
+    local ToggleCorner = Instance.new("UICorner")
+    ToggleCorner.CornerRadius = UDim.new(0, 8)
+    ToggleCorner.Parent = ToggleFrame
+    
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(0.7, 0, 1, 0)
+    Label.Position = UDim2.new(0, 10, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = icon .. " " .. name
+    Label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Label.TextSize = 16
+    Label.Font = Enum.Font.Gotham
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = ToggleFrame
+    
+    local ToggleButton = Instance.new("TextButton")
+    ToggleButton.Size = UDim2.new(0, 50, 0, 25)
+    ToggleButton.Position = UDim2.new(1, -60, 0.5, -12.5)
+    ToggleButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    ToggleButton.Text = "OFF"
+    ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    ToggleButton.TextSize = 14
+    ToggleButton.Font = Enum.Font.GothamBold
+    ToggleButton.Parent = ToggleFrame
+    
+    local ButtonCorner = Instance.new("UICorner")
+    ButtonCorner.CornerRadius = UDim.new(0, 6)
+    ButtonCorner.Parent = ToggleButton
+    
+    local enabled = false
+    ToggleButton.MouseButton1Click:Connect(function()
+        enabled = not enabled
+        ToggleButton.Text = enabled and "ON" or "OFF"
+        ToggleButton.BackgroundColor3 = enabled and Color3.fromRGB(218, 165, 32) or Color3.fromRGB(60, 60, 60)
+        callback(enabled)
+    end)
+    
+    return ToggleFrame, ToggleButton
+end
+
+-- Helper function to create slider
+local function createSlider(name, min, max, default, callback)
+    local SliderFrame = Instance.new("Frame")
+    SliderFrame.Size = UDim2.new(1, 0, 0, 80)
+    SliderFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    SliderFrame.BorderSizePixel = 0
+    SliderFrame.Parent = ScrollFrame
+    
+    local SliderCorner = Instance.new("UICorner")
+    SliderCorner.CornerRadius = UDim.new(0, 8)
+    SliderCorner.Parent = SliderFrame
+    
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -20, 0, 25)
+    Label.Position = UDim2.new(0, 10, 0, 5)
+    Label.BackgroundTransparency = 1
+    Label.Text = name .. ": " .. default
+    Label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Label.TextSize = 14
+    Label.Font = Enum.Font.Gotham
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = SliderFrame
+    
+    local SliderBar = Instance.new("Frame")
+    SliderBar.Size = UDim2.new(1, -20, 0, 8)
+    SliderBar.Position = UDim2.new(0, 10, 0, 40)
+    SliderBar.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    SliderBar.BorderSizePixel = 0
+    SliderBar.Parent = SliderFrame
+    
+    local BarCorner = Instance.new("UICorner")
+    BarCorner.CornerRadius = UDim.new(1, 0)
+    BarCorner.Parent = SliderBar
+    
+    local Fill = Instance.new("Frame")
+    Fill.Size = UDim2.new((default - min) / (max - min), 0, 1, 0)
+    Fill.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
+    Fill.BorderSizePixel = 0
+    Fill.Parent = SliderBar
+    
+    local FillCorner = Instance.new("UICorner")
+    FillCorner.CornerRadius = UDim.new(1, 0)
+    FillCorner.Parent = Fill
+    
+    local Dragger = Instance.new("TextButton")
+    Dragger.Size = UDim2.new(0, 20, 0, 20)
+    Dragger.Position = UDim2.new((default - min) / (max - min), -10, 0.5, -10)
+    Dragger.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    Dragger.Text = ""
+    Dragger.Parent = SliderBar
+    
+    local DraggerCorner = Instance.new("UICorner")
+    DraggerCorner.CornerRadius = UDim.new(1, 0)
+    DraggerCorner.Parent = Dragger
+    
+    local dragging = false
+    local currentValue = default
+    
+    Dragger.MouseButton1Down:Connect(function()
+        dragging = true
+    end)
+    
+    game:GetService("UserInputService").InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+    
+    RunService.RenderStepped:Connect(function()
+        if dragging then
+            local mouse = LocalPlayer:GetMouse()
+            local relativeX = math.clamp(mouse.X - SliderBar.AbsolutePosition.X, 0, SliderBar.AbsoluteSize.X)
+            local percent = relativeX / SliderBar.AbsoluteSize.X
+            currentValue = math.floor(min + (max - min) * percent)
+            
+            Fill.Size = UDim2.new(percent, 0, 1, 0)
+            Dragger.Position = UDim2.new(percent, -10, 0.5, -10)
+            Label.Text = name .. ": " .. currentValue
+            
+            callback(currentValue)
+        end
+    end)
+    
+    return SliderFrame
+end
+
+-- Helper function to create dropdown
+local function createDropdown(name, options, default, callback)
+    local DropdownFrame = Instance.new("Frame")
+    DropdownFrame.Size = UDim2.new(1, 0, 0, 60)
+    DropdownFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    DropdownFrame.BorderSizePixel = 0
+    DropdownFrame.Parent = ScrollFrame
+    
+    local DropdownCorner = Instance.new("UICorner")
+    DropdownCorner.CornerRadius = UDim.new(0, 8)
+    DropdownCorner.Parent = DropdownFrame
+    
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -20, 0, 20)
+    Label.Position = UDim2.new(0, 10, 0, 5)
+    Label.BackgroundTransparency = 1
+    Label.Text = name
+    Label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Label.TextSize = 14
+    Label.Font = Enum.Font.Gotham
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = DropdownFrame
+    
+    local DropdownButton = Instance.new("TextButton")
+    DropdownButton.Size = UDim2.new(1, -20, 0, 25)
+    DropdownButton.Position = UDim2.new(0, 10, 0, 30)
+    DropdownButton.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    DropdownButton.Text = default
+    DropdownButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    DropdownButton.TextSize = 14
+    DropdownButton.Font = Enum.Font.Gotham
+    DropdownButton.Parent = DropdownFrame
+    
+    local ButtonCorner = Instance.new("UICorner")
+    ButtonCorner.CornerRadius = UDim.new(0, 6)
+    ButtonCorner.Parent = DropdownButton
+    
+    local DropdownList = Instance.new("ScrollingFrame")
+    DropdownList.Size = UDim2.new(1, -20, 0, 0)
+    DropdownList.Position = UDim2.new(0, 10, 0, 60)
+    DropdownList.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    DropdownList.BorderSizePixel = 0
+    DropdownList.Visible = false
+    DropdownList.ZIndex = 10
+    DropdownList.ScrollBarThickness = 4
+    DropdownList.CanvasSize = UDim2.new(0, 0, 0, #options * 30)
+    DropdownList.Parent = DropdownFrame
+    
+    local ListCorner = Instance.new("UICorner")
+    ListCorner.CornerRadius = UDim.new(0, 6)
+    ListCorner.Parent = DropdownList
+    
+    local ListLayout = Instance.new("UIListLayout")
+    ListLayout.Padding = UDim.new(0, 2)
+    ListLayout.Parent = DropdownList
+    
+    DropdownButton.MouseButton1Click:Connect(function()
+        DropdownList.Visible = not DropdownList.Visible
+        if DropdownList.Visible then
+            local listHeight = math.min(#options * 30, 150)
+            DropdownFrame.Size = UDim2.new(1, 0, 0, 60 + listHeight)
+            DropdownList.Size = UDim2.new(1, -20, 0, listHeight)
+        else
+            DropdownFrame.Size = UDim2.new(1, 0, 0, 60)
+        end
+    end)
+    
+    for _, option in ipairs(options) do
+        local OptionButton = Instance.new("TextButton")
+        OptionButton.Size = UDim2.new(1, 0, 0, 28)
+        OptionButton.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        OptionButton.Text = option
+        OptionButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        OptionButton.TextSize = 14
+        OptionButton.Font = Enum.Font.Gotham
+        OptionButton.BorderSizePixel = 0
+        OptionButton.Parent = DropdownList
+        
+        OptionButton.MouseEnter:Connect(function()
+            OptionButton.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
+        end)
+        
+        OptionButton.MouseLeave:Connect(function()
+            OptionButton.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        end)
+        
+        OptionButton.MouseButton1Click:Connect(function()
+            DropdownButton.Text = option
+            DropdownList.Visible = false
+            DropdownFrame.Size = UDim2.new(1, 0, 0, 60)
+            callback(option)
+        end)
+    end
+    
+    return DropdownFrame
+end
+
+-- Create UI Elements
+createToggle("Auto Hit Resources", "🔨", function(enabled)
+    autoHitEnabled = enabled
+    if enabled then
+        autoHitConnection = RunService.Heartbeat:Connect(interactWithNearbyResources)
+    else
+        if autoHitConnection then
+            autoHitConnection:Disconnect()
+        end
+    end
+end)
+
+createSlider("Hit Radius", 10, 200, hitRadius, function(value)
+    hitRadius = value
+end)
+
+createToggle("Noclip (Doors & Boards)", "👻", function(enabled)
+    noclipEnabled = enabled
+    noclipDoors()
+    if enabled then
+        noclipConnection = RunService.Heartbeat:Connect(noclipDoors)
+    else
+        if noclipConnection then
+            noclipConnection:Disconnect()
+        end
+        noclipDoors()
+    end
+end)
+
+createDropdown("Select Fruit", fruitOptions, selectedFruit, function(fruit)
+    selectedFruit = fruit
+end)
+
+createToggle("Auto Eat", "🍎", function(enabled)
+    autoEatEnabled = enabled
+    if enabled then
+        autoEatLoop = task.spawn(autoEatLoop)
+    else
+        if autoEatLoop then
+            task.cancel(autoEatLoop)
+        end
+    end
+end)
+
+createToggle("Position Tween", "🧭", function(enabled)
+    tweenEnabled = enabled
+    if enabled then
+        task.spawn(startTweening)
+    else
+        if currentTween then
+            currentTween:Cancel()
+        end
+    end
+end)
+
+createSlider("Tween Speed", 1, 50, tweenSpeed, function(value)
+    tweenSpeed = value
+end)
+
+createSlider("Wait Time (seconds)", 0, 2, waitTime, function(value)
+    waitTime = value / 10
+end)
+
+createToggle("Pickup Raw Gold", "💰", function(enabled)
+    pickupRawGoldEnabled = enabled
+    if enabled then
+        pickupRawGoldTask = task.spawn(pickupRawGolds)
+    else
+        if pickupRawGoldTask then
+            task.cancel(pickupRawGoldTask)
+        end
+    end
+end)
+
+createToggle("Pickup Coal", "⚫", function(enabled)
+    pickupCoalEnabled = enabled
+    if enabled then
+        pickupCoalTask = task.spawn(pickupCoal)
+    else
+        if pickupCoalTask then
+            task.cancel(pickupCoalTask)
+        end
+    end
+end)
+
+-- Info Label
+local InfoFrame = Instance.new("Frame")
+InfoFrame.Size = UDim2.new(1, 0, 0, 60)
+InfoFrame.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
+InfoFrame.BackgroundTransparency = 0.8
+InfoFrame.BorderSizePixel = 0
+InfoFrame.Parent = ScrollFrame
+
+local InfoCorner = Instance.new("UICorner")
+InfoCorner.CornerRadius = UDim.new(0, 8)
+InfoCorner.Parent = InfoFrame
+
+local InfoLabel = Instance.new("TextLabel")
+InfoLabel.Size = UDim2.new(1, -20, 1, -20)
+InfoLabel.Position = UDim2.new(0, 10, 0, 10)
+InfoLabel.BackgroundTransparency = 1
+InfoLabel.Text = "ℹ️ Loaded " .. #positions .. " positions\nConfig loaded from GitHub"
+InfoLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+InfoLabel.TextSize = 12
+InfoLabel.Font = Enum.Font.Gotham
+InfoLabel.TextWrapped = true
+InfoLabel.Parent = InfoFrame
+
+-- Make GUI draggable
+local dragging
+local dragInput
+local dragStart
+local startPos
+
+local function update(input)
+    local delta = input.Position - dragStart
+    MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+end
+
+Header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+        
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+Header.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement then
+        dragInput = input
+    end
+end)
+
+game:GetService("UserInputService").InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        update(input)
+    end
+end)
+
+print("Gold Tweens Hub loaded! Tween config loaded from GitHub file")
