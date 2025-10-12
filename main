@@ -15,6 +15,7 @@ local GameUtil = require(RS.Modules.GameUtil)
 local ItemIDS = require(RS.Modules.ItemIDS)
 local ItemData = require(RS.Modules.ItemData)
 
+-- Load config
 local success, config = pcall(function()
     return loadstring(game:HttpGet("https://raw.githubusercontent.com/Zacharificy/goldfarm/main/tweens"))()
 end)
@@ -26,6 +27,7 @@ else
     warn("❌ config load failed")
 end
 
+-- State management
 local state = {
     autoHit = false,
     noclip = false,
@@ -36,7 +38,9 @@ local state = {
     antiAFK = false,
     coinPress = false,
     campfireFuel = false,
-    tpRawGoldToChest = false
+    tpRawGoldToChest = false,
+    pickupGoldFromChest = false,
+    pickupCoins = false
 }
 
 local settings = {
@@ -57,6 +61,7 @@ local LOOP_WAIT_SECONDS = 1
 local POST_EAT_COOLDOWN = 2.0
 local lastEatTime = 0
 
+-- Anti-AFK Setup
 local function setupAntiAFK()
     local GC = getconnections or get_signal_cons
     if GC then
@@ -78,14 +83,7 @@ local function setupAntiAFK()
     end
 end
 
-local function disableAntiAFK()
-    if connections.antiAFK then
-        connections.antiAFK:Disconnect()
-        connections.antiAFK = nil
-    end
-    print("❌ anti-afk disabled")
-end
-
+-- Get fruit options
 local fruitOptions = {}
 for name, data in pairs(ItemData) do
     if data.grows then
@@ -97,12 +95,14 @@ if #fruitOptions == 0 then
     fruitOptions = {"Bloodfruit", "Strawberry", "Berries", "Cloudberry", "Prickly Pear", "Lemon"}
 end
 
+-- Character updates
 LocalPlayer.CharacterAdded:Connect(function(char)
     Character = char
     Humanoid = char:WaitForChild("Humanoid")
     Root = char:WaitForChild("HumanoidRootPart")
 end)
 
+-- Hit resources
 local hitDebounce = false
 local function hitResources()
     if not state.autoHit or hitDebounce then return end
@@ -122,6 +122,7 @@ local function hitResources()
     task.delay(0.1, function() hitDebounce = false end)
 end
 
+-- Noclip
 local function noclip()
     for _, v in workspace.Deployables:GetChildren() do
         local door = v:FindFirstChild("Door")
@@ -148,6 +149,7 @@ local function noclip()
     end
 end
 
+-- Helper functions
 local function findFruit(name)
     for idx, data in next, GameUtil.getData().inventory do
         if data.name == name then return idx end
@@ -169,16 +171,12 @@ local function canEatNow()
     return (tick() - lastEatTime) >= POST_EAT_COOLDOWN
 end
 
-local function eatFruitOnce(idx)
-    Packets.UseBagItem.send(idx)
-    lastEatTime = tick()
-end
-
 local function willOvereat(currentHunger, restore)
     if not restore then return false end
     return (currentHunger + restore) > HUNGER_CAP
 end
 
+-- Auto eat
 local function autoEat()
     while state.autoEat do
         local hunger = getHunger()
@@ -193,9 +191,9 @@ local function autoEat()
                 local idx = findFruit(settings.fruit)
                 if idx then
                     local restore = getRestore(settings.fruit)
-                    
                     if not (restore and willOvereat(hunger, restore) and health > 90) then
-                        eatFruitOnce(idx)
+                        Packets.UseBagItem.send(idx)
+                        lastEatTime = tick()
                     end
                 else
                     warn("fruit not found: " .. tostring(settings.fruit))
@@ -207,6 +205,7 @@ local function autoEat()
     end
 end
 
+-- Pickup items
 local pickupDebounce = {}
 local function pickup(itemName)
     local enabled = itemName == "Raw Gold" and state.pickupGold or state.pickupCoal
@@ -268,6 +267,7 @@ local function getQuantity(name)
     return 0
 end
 
+-- Coin press
 local SEND_DT = 0.01
 local LOOKUP_DT = 1
 local BURST_MAX = 10
@@ -299,35 +299,42 @@ local function pressCoins()
     end
 end
 
+-- Improved Campfire refuel (from immortal.tech)
 local function campfireRefuelLoop()
     while state.campfireFuel do
         local deployablesFolder = Workspace:FindFirstChild("Deployables")
         
         if deployablesFolder and Root then
-            for _, v in ipairs(deployablesFolder:GetChildren()) do
-                if v.Name == "Campfire" and v:IsA("Model") then
-                    local ok, pivot = pcall(function() return v:GetPivot() end)
-                    if ok and pivot then
-                        local dist = (Root.Position - pivot.Position).Magnitude
-                        if dist < 30 then
-                            local board = v:FindFirstChild("Board")
-                            local bb = board and board:FindFirstChild("Billboard")
-                            local back = bb and bb:FindFirstChild("Backdrop")
-                            local tl = back and back:FindFirstChild("TextLabel")
-                            local secondsLeft = tonumber(tl and tl.Text) or 999
-
-                            if secondsLeft <= 10 then
-                                local coalQty = getQuantity("Coal")
-                                if coalQty > 0 then
-                                    local entityID = v:GetAttribute("EntityID")
-                                    if entityID then
-                                        Packets.InteractStructure.send({
-                                            entityID = entityID,
-                                            itemID = ItemIDS.Coal
-                                        })
-                                        task.wait(0.05)
-                                    end
-                                end
+            for _, structure in ipairs(deployablesFolder:GetChildren()) do
+                local dist = (structure:GetPivot().Position - Root.Position).Magnitude
+                
+                if structure.Name == "Campfire" and structure:GetAttribute("EntityID") and dist <= 40 then
+                    local board = structure:FindFirstChild("Board")
+                    local billboard = board and board:FindFirstChild("Billboard")
+                    local backdrop = billboard and billboard:FindFirstChild("Backdrop")
+                    local textLabel = backdrop and backdrop:FindFirstChild("TextLabel")
+                    
+                    if textLabel then
+                        local fireValue = tonumber(textLabel.Text) or 999
+                        
+                        if fireValue <= 200 then
+                            local amount = 0
+                            local tempFire = fireValue
+                            
+                            -- Calculate how many logs needed
+                            for i = 1, 10 do
+                                if tempFire >= 250 then break end
+                                tempFire = tempFire + 50
+                                amount = amount + 1
+                            end
+                            
+                            -- Add the logs
+                            for i = 1, amount do
+                                Packets.InteractStructure.send({
+                                    entityID = structure:GetAttribute("EntityID"),
+                                    itemID = ItemIDS.Log
+                                })
+                                task.wait(0.05)
                             end
                         end
                     end
@@ -338,8 +345,11 @@ local function campfireRefuelLoop()
     end
 end
 
+-- Improved TP Raw Gold to Chest (from immortal.tech)
 local function tpRawGoldLoop()
     while state.tpRawGoldToChest do
+        task.wait(0.1)
+        
         if not chest or not chest.Parent then
             chest = getDeployable("Chest", 100)
             if not chest then
@@ -354,20 +364,75 @@ local function tpRawGoldLoop()
             for _, item in ipairs(items:GetChildren()) do
                 if item.Name == "Raw Gold" and item.Parent == items then
                     local id = item:GetAttribute("EntityID")
+                    
+                    -- Wait a bit for EntityID if not available
+                    if not id then
+                        local t0 = os.clock()
+                        while not id and item.Parent == items and os.clock() - t0 < 1 do
+                            task.wait(0.1)
+                            id = item:GetAttribute("EntityID")
+                        end
+                    end
+                    
                     if id then
+                        -- Use ForceInteract to gain network ownership
                         Packets.ForceInteract.send(id)
-                        pcall(function() 
-                            item:PivotTo(chest:GetPivot()) 
+                        task.wait(0.05)
+                        
+                        -- Teleport directly to chest
+                        local success = pcall(function()
+                            if item and item.Parent == items and chest and chest.Parent then
+                                item:PivotTo(chest:GetPivot() * CFrame.new(0, 2, 0))
+                            end
                         end)
+                        
+                        task.wait(0.05)
+                        
+                        -- Release network ownership
                         Packets.ForceInteract.send()
+                        
+                        if not success then
+                            warn("failed to teleport raw gold")
+                        end
                     end
                 end
             end
         end
-        task.wait(0.1)
     end
 end
 
+-- NEW: Pickup gold from chest
+local function pickupGoldFromChestLoop()
+    while state.pickupGoldFromChest do
+        if not chest or not chest.Parent then
+            chest = getDeployable("Chest", 100)
+            if not chest then
+                warn("no chest found nearby for pickup")
+                task.wait(1)
+                continue
+            end
+        end
+        
+        local contents = chest:FindFirstChild("Contents")
+        if contents then
+            for _, item in ipairs(contents:GetChildren()) do
+                if item.Name == "Gold" or item.Name == "Raw Gold" then
+                    local id = item:GetAttribute("EntityID")
+                    if id then
+                        for i = 1, 8 do
+                            if not item or item.Parent ~= contents then break end
+                            Packets.Pickup.send(id)
+                            task.wait(0.05)
+                        end
+                    end
+                end
+            end
+        end
+        task.wait(0.25)
+    end
+end
+
+-- Tween path (optimized)
 local function tweenPath()
     if #settings.positions == 0 then
         warn("no positions loaded!")
@@ -388,27 +453,14 @@ local function tweenPath()
     end
 
     local curIndex = nearestIndex(Root.Position)
-    local fails = table.create(#settings.positions, 0)
-    local rbCount = table.create(#settings.positions, 0)
-
     local REACH_RADIUS = 4
     local MIN_IMPROVE_STUDS = 0.75
     local NO_PROGRESS_SECS = 2.5
-    local TELEPORT_BACK_DINC = 8
-    local TELEPORT_STEP_JUMP = 15
-    local RUBBER_DEV_STUDS = 6
-    local SETTLE_SECS = 0.40
-    local MAX_RB_PER_NODE = 3
-    local JUMP_SAMPLE_SECS = 0.20
 
     while state.tween do
         if not Root or not Root.Parent or not Humanoid or not Humanoid.Parent then
             task.wait(1)
             continue
-        end
-
-        if curIndex < 1 or curIndex > #settings.positions then
-            curIndex = 1
         end
 
         local pos = settings.positions[curIndex]
@@ -421,8 +473,7 @@ local function tweenPath()
         local targetPos = Vector3.new(pos.X, pos.Y, pos.Z)
         local startPos = Root.Position
         local dist = (startPos - targetPos).Magnitude
-        local speed = 18.6
-        local MAX_TRAVEL_SECS = math.max(15, dist / (speed * 0.6))
+        local speed = settings.tweenSpeed
         local duration = math.max(0.02, dist / speed)
 
         if connections.tweenConn then
@@ -437,13 +488,10 @@ local function tweenPath()
         local ti = TweenInfo.new(duration, Enum.EasingStyle.Linear)
         connections.tween = TweenService:Create(Root, ti, {CFrame = CFrame.new(targetPos)})
 
-        local completed, restartToNext, rubberbanded = false, false, false
-        local jumpOuter = false
-
+        local completed = false
         local t0 = tick()
         local lastPoll = t0
-        local lastPos = startPos
-        local lastDist = (lastPos - targetPos).Magnitude
+        local lastDist = (Root.Position - targetPos).Magnitude
 
         connections.tweenConn = connections.tween.Completed:Connect(function()
             completed = true
@@ -456,72 +504,20 @@ local function tweenPath()
         connections.tween:Play()
 
         while state.tween and not completed do
-            task.wait(JUMP_SAMPLE_SECS)
-
-            local now = tick()
-            local elapsed = now - t0
-            local alpha = math.clamp(elapsed / duration, 0, 1)
-
-            local curPos = Root.Position
-            local curDist = (curPos - targetPos).Magnitude
-
+            task.wait(0.2)
+            
+            local curDist = (Root.Position - targetPos).Magnitude
             if curDist <= REACH_RADIUS then
                 completed = true
                 break
             end
 
-            local stepJump = (curPos - lastPos).Magnitude
-            if (curDist - lastDist) >= TELEPORT_BACK_DINC or stepJump >= TELEPORT_STEP_JUMP then
-                rubberbanded = true
-            end
-
-            do
-                local expectPos = startPos:Lerp(targetPos, alpha)
-                local dev = (curPos - expectPos).Magnitude
-                if dev >= RUBBER_DEV_STUDS then
-                    local vmag = Root.AssemblyLinearVelocity.Magnitude
-                    if vmag < 1 or dev > (RUBBER_DEV_STUDS * 1.5) then
-                        rubberbanded = true
-                    end
-                end
-            end
-
-            if (now - t0) > MAX_TRAVEL_SECS or ((now - lastPoll) > NO_PROGRESS_SECS and (lastDist - curDist) < MIN_IMPROVE_STUDS) then
-                restartToNext = true
+            if (tick() - lastPoll) > NO_PROGRESS_SECS and (lastDist - curDist) < MIN_IMPROVE_STUDS then
                 break
             end
 
-            if rubberbanded then
-                if connections.tweenConn then
-                    connections.tweenConn:Disconnect()
-                    connections.tweenConn = nil
-                end
-                if connections.tween then
-                    connections.tween:Cancel()
-                    connections.tween = nil
-                end
-
-                task.wait(SETTLE_SECS)
-                local serverPos = Root.Position
-                local newIndex = nearestIndex(serverPos)
-
-                rbCount[curIndex] = (rbCount[curIndex] or 0) + 1
-                if rbCount[curIndex] >= MAX_RB_PER_NODE then
-                    rbCount[curIndex] = 0
-                    curIndex = (curIndex % #settings.positions) + 1
-                else
-                    curIndex = newIndex
-                end
-
-                Root.Anchored = false
-                task.wait(0.1)
-                jumpOuter = true
-                break
-            end
-
-            lastPoll = now
+            lastPoll = tick()
             lastDist = curDist
-            lastPos = curPos
         end
 
         if connections.tweenConn then
@@ -533,117 +529,119 @@ local function tweenPath()
             connections.tween = nil
         end
 
-        if jumpOuter then
-            continue
-        end
-
-        if restartToNext then
-            fails[curIndex] = (fails[curIndex] or 0) + 1
-            if fails[curIndex] >= 3 then
-                fails[curIndex] = 0
-            end
-            curIndex = (curIndex % #settings.positions) + 1
-            Root.Anchored = false
-            task.wait(0.15)
-            continue
-        end
-
-        fails[curIndex] = 0
-        rbCount[curIndex] = 0
         curIndex = (curIndex % #settings.positions) + 1
         task.wait(settings.waitTime or 0.1)
     end
 
-    if connections.tweenConn then
-        connections.tweenConn:Disconnect()
-        connections.tweenConn = nil
-    end
-    if connections.tween then
-        connections.tween:Cancel()
-        connections.tween = nil
-    end
     Root.Anchored = false
 end
 
+-- All function definitions must be complete before creating UI
+
+-- GUI Creation (optimized and more appealing)
 local gui = Instance.new("ScreenGui")
 gui.Name = "TweenHub"
 gui.ResetOnSpawn = false
 gui.Parent = game.CoreGui
 
 local main = Instance.new("Frame")
-main.Size = UDim2.new(0, 400, 0, 500)
-main.Position = UDim2.new(0.5, -200, 0.5, -250)
-main.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+main.Size = UDim2.new(0, 420, 0, 520)
+main.Position = UDim2.new(0.5, -210, 0.5, -260)
+main.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
 main.BorderSizePixel = 0
 main.Parent = gui
 
 local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 12)
+corner.CornerRadius = UDim.new(0, 16)
 corner.Parent = main
 
+-- Add shadow effect
+local shadow = Instance.new("ImageLabel")
+shadow.Name = "Shadow"
+shadow.Size = UDim2.new(1, 30, 1, 30)
+shadow.Position = UDim2.new(0, -15, 0, -15)
+shadow.BackgroundTransparency = 1
+shadow.Image = "rbxasset://textures/ui/InspectMenu/Shadow.png"
+shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+shadow.ImageTransparency = 0.5
+shadow.ScaleType = Enum.ScaleType.Slice
+shadow.SliceCenter = Rect.new(10, 10, 118, 118)
+shadow.ZIndex = 0
+shadow.Parent = main
+
 local header = Instance.new("Frame")
-header.Size = UDim2.new(1, 0, 0, 50)
-header.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
+header.Size = UDim2.new(1, 0, 0, 55)
+header.BackgroundColor3 = Color3.fromRGB(30, 144, 255)
 header.BorderSizePixel = 0
 header.Parent = main
 
 local hCorner = Instance.new("UICorner")
-hCorner.CornerRadius = UDim.new(0, 12)
+hCorner.CornerRadius = UDim.new(0, 16)
 hCorner.Parent = header
 
 local hFix = Instance.new("Frame")
-hFix.Size = UDim2.new(1, 0, 0, 12)
-hFix.Position = UDim2.new(0, 0, 1, -12)
-hFix.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
+hFix.Size = UDim2.new(1, 0, 0, 16)
+hFix.Position = UDim2.new(0, 0, 1, -16)
+hFix.BackgroundColor3 = Color3.fromRGB(30, 144, 255)
 hFix.BorderSizePixel = 0
 hFix.Parent = header
 
 local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, -20, 1, 0)
-title.Position = UDim2.new(0, 10, 0, 0)
+title.Size = UDim2.new(1, -60, 1, 0)
+title.Position = UDim2.new(0, 15, 0, 0)
 title.BackgroundTransparency = 1
-title.Text = "tween hub"
+title.Text = "⚡ Tween Hub"
 title.TextColor3 = Color3.fromRGB(255, 255, 255)
-title.TextSize = 24
+title.TextSize = 26
 title.Font = Enum.Font.GothamBold
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Parent = header
 
 local close = Instance.new("TextButton")
-close.Size = UDim2.new(0, 30, 0, 30)
-close.Position = UDim2.new(1, -40, 0, 10)
-close.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
-close.Text = "X"
+close.Size = UDim2.new(0, 35, 0, 35)
+close.Position = UDim2.new(1, -45, 0, 10)
+close.BackgroundColor3 = Color3.fromRGB(255, 59, 59)
+close.Text = "×"
 close.TextColor3 = Color3.fromRGB(255, 255, 255)
-close.TextSize = 18
+close.TextSize = 24
 close.Font = Enum.Font.GothamBold
 close.Parent = header
 
 local cCorner = Instance.new("UICorner")
-cCorner.CornerRadius = UDim.new(0, 6)
+cCorner.CornerRadius = UDim.new(0, 8)
 cCorner.Parent = close
+
+close.MouseEnter:Connect(function()
+    TweenService:Create(close, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(255, 80, 80)}):Play()
+end)
+
+close.MouseLeave:Connect(function()
+    TweenService:Create(close, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(255, 59, 59)}):Play()
+end)
 
 close.MouseButton1Click:Connect(function()
     gui:Destroy()
 end)
 
+-- Tab system
 local tabContainer = Instance.new("Frame")
-tabContainer.Size = UDim2.new(1, -20, 0, 40)
-tabContainer.Position = UDim2.new(0, 10, 0, 60)
+tabContainer.Size = UDim2.new(1, -20, 0, 45)
+tabContainer.Position = UDim2.new(0, 10, 0, 65)
 tabContainer.BackgroundTransparency = 1
 tabContainer.Parent = main
 
 local tabLayout = Instance.new("UIListLayout")
 tabLayout.FillDirection = Enum.FillDirection.Horizontal
-tabLayout.Padding = UDim.new(0, 5)
+tabLayout.Padding = UDim.new(0, 8)
 tabLayout.Parent = tabContainer
 
 local scroll = Instance.new("ScrollingFrame")
-scroll.Size = UDim2.new(1, -20, 1, -120)
-scroll.Position = UDim2.new(0, 10, 0, 110)
+scroll.Size = UDim2.new(1, -20, 1, -130)
+scroll.Position = UDim2.new(0, 10, 0, 120)
 scroll.BackgroundTransparency = 1
 scroll.BorderSizePixel = 0
-scroll.ScrollBarThickness = 6
+scroll.ScrollBarThickness = 4
+scroll.ScrollBarImageColor3 = Color3.fromRGB(30, 144, 255)
 scroll.Parent = main
 
 local mainContent = Instance.new("Frame")
@@ -659,26 +657,39 @@ extraContent.Visible = false
 extraContent.Parent = scroll
 
 local mainLayout = Instance.new("UIListLayout")
-mainLayout.Padding = UDim.new(0, 10)
+mainLayout.Padding = UDim.new(0, 12)
 mainLayout.Parent = mainContent
 
 local extraLayout = Instance.new("UIListLayout")
-extraLayout.Padding = UDim.new(0, 10)
+extraLayout.Padding = UDim.new(0, 12)
 extraLayout.Parent = extraContent
 
+-- Tab creation function
 local function createTab(name, icon)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0, 120, 1, 0)
-    btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    btn.Size = UDim2.new(0, 130, 1, 0)
+    btn.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
     btn.Text = icon .. " " .. name
-    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    btn.TextSize = 14
-    btn.Font = Enum.Font.Gotham
+    btn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    btn.TextSize = 15
+    btn.Font = Enum.Font.GothamSemibold
     btn.Parent = tabContainer
     
     local btnCorner = Instance.new("UICorner")
-    btnCorner.CornerRadius = UDim.new(0, 6)
+    btnCorner.CornerRadius = UDim.new(0, 8)
     btnCorner.Parent = btn
+    
+    btn.MouseEnter:Connect(function()
+        if not btn:FindFirstChild("Active") then
+            TweenService:Create(btn, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(45, 45, 50)}):Play()
+        end
+    end)
+    
+    btn.MouseLeave:Connect(function()
+        if not btn:FindFirstChild("Active") then
+            TweenService:Create(btn, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(35, 35, 40)}):Play()
+        end
+    end)
     
     btn.MouseButton1Click:Connect(function()
         mainContent.Visible = false
@@ -686,7 +697,13 @@ local function createTab(name, icon)
         
         for _, child in ipairs(tabContainer:GetChildren()) do
             if child:IsA("TextButton") then
-                child.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+                if child:FindFirstChild("Active") then
+                    child.Active:Destroy()
+                end
+                TweenService:Create(child, TweenInfo.new(0.2), {
+                    BackgroundColor3 = Color3.fromRGB(35, 35, 40),
+                    TextColor3 = Color3.fromRGB(200, 200, 200)
+                }):Play()
             end
         end
         
@@ -696,7 +713,15 @@ local function createTab(name, icon)
             extraContent.Visible = true
         end
         
-        btn.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
+        local active = Instance.new("BoolValue")
+        active.Name = "Active"
+        active.Parent = btn
+        
+        TweenService:Create(btn, TweenInfo.new(0.2), {
+            BackgroundColor3 = Color3.fromRGB(30, 144, 255),
+            TextColor3 = Color3.fromRGB(255, 255, 255)
+        }):Play()
+        
         settings.currentTab = name
     end)
     
@@ -706,77 +731,84 @@ end
 createTab("main", "🏠")
 createTab("extra", "⚙️")
 
+-- UI element creation functions
 local function toggle(name, icon, callback, parent)
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 60)
-    frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    frame.Size = UDim2.new(1, 0, 0, 65)
+    frame.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
     frame.BorderSizePixel = 0
     frame.Parent = parent or mainContent
     
     local fCorner = Instance.new("UICorner")
-    fCorner.CornerRadius = UDim.new(0, 8)
+    fCorner.CornerRadius = UDim.new(0, 10)
     fCorner.Parent = frame
     
     local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(0.7, 0, 1, 0)
-    label.Position = UDim2.new(0, 10, 0, 0)
+    label.Size = UDim2.new(0.65, 0, 1, 0)
+    label.Position = UDim2.new(0, 12, 0, 0)
     label.BackgroundTransparency = 1
     label.Text = icon .. " " .. name
-    label.TextColor3 = Color3.fromRGB(255, 255, 255)
-    label.TextSize = 16
-    label.Font = Enum.Font.Gotham
+    label.TextColor3 = Color3.fromRGB(230, 230, 230)
+    label.TextSize = 15
+    label.Font = Enum.Font.GothamSemibold
     label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextWrapped = true
     label.Parent = frame
     
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0, 50, 0, 25)
-    btn.Position = UDim2.new(1, -60, 0.5, -12.5)
-    btn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-    btn.Text = "off"
-    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    btn.TextSize = 14
+    btn.Size = UDim2.new(0, 55, 0, 28)
+    btn.Position = UDim2.new(1, -65, 0.5, -14)
+    btn.BackgroundColor3 = Color3.fromRGB(60, 60, 65)
+    btn.Text = "OFF"
+    btn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    btn.TextSize = 13
     btn.Font = Enum.Font.GothamBold
     btn.Parent = frame
     
     local bCorner = Instance.new("UICorner")
-    bCorner.CornerRadius = UDim.new(0, 6)
+    bCorner.CornerRadius = UDim.new(0, 7)
     bCorner.Parent = btn
     
     local on = false
     btn.MouseButton1Click:Connect(function()
         on = not on
-        btn.Text = on and "on" or "off"
-        btn.BackgroundColor3 = on and Color3.fromRGB(218, 165, 32) or Color3.fromRGB(60, 60, 60)
+        btn.Text = on and "ON" or "OFF"
+        
+        TweenService:Create(btn, TweenInfo.new(0.2), {
+            BackgroundColor3 = on and Color3.fromRGB(0, 200, 100) or Color3.fromRGB(60, 60, 65),
+            TextColor3 = Color3.fromRGB(255, 255, 255)
+        }):Play()
+        
         callback(on)
     end)
 end
 
 local function slider(name, min, max, def, callback, parent)
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 80)
-    frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    frame.Size = UDim2.new(1, 0, 0, 85)
+    frame.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
     frame.BorderSizePixel = 0
     frame.Parent = parent or mainContent
     
     local fCorner = Instance.new("UICorner")
-    fCorner.CornerRadius = UDim.new(0, 8)
+    fCorner.CornerRadius = UDim.new(0, 10)
     fCorner.Parent = frame
     
     local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(1, -20, 0, 25)
-    label.Position = UDim2.new(0, 10, 0, 5)
+    label.Size = UDim2.new(1, -20, 0, 28)
+    label.Position = UDim2.new(0, 12, 0, 8)
     label.BackgroundTransparency = 1
     label.Text = name .. ": " .. def
-    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextColor3 = Color3.fromRGB(230, 230, 230)
     label.TextSize = 14
-    label.Font = Enum.Font.Gotham
+    label.Font = Enum.Font.GothamSemibold
     label.TextXAlignment = Enum.TextXAlignment.Left
     label.Parent = frame
     
     local bar = Instance.new("Frame")
-    bar.Size = UDim2.new(1, -20, 0, 8)
-    bar.Position = UDim2.new(0, 10, 0, 40)
-    bar.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    bar.Size = UDim2.new(1, -24, 0, 10)
+    bar.Position = UDim2.new(0, 12, 0, 45)
+    bar.BackgroundColor3 = Color3.fromRGB(50, 50, 55)
     bar.BorderSizePixel = 0
     bar.Parent = frame
     
@@ -786,7 +818,7 @@ local function slider(name, min, max, def, callback, parent)
     
     local fill = Instance.new("Frame")
     fill.Size = UDim2.new((def - min) / (max - min), 0, 1, 0)
-    fill.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
+    fill.BackgroundColor3 = Color3.fromRGB(30, 144, 255)
     fill.BorderSizePixel = 0
     fill.Parent = bar
     
@@ -795,8 +827,8 @@ local function slider(name, min, max, def, callback, parent)
     fCorner2.Parent = fill
     
     local drag = Instance.new("TextButton")
-    drag.Size = UDim2.new(0, 20, 0, 20)
-    drag.Position = UDim2.new((def - min) / (max - min), -10, 0.5, -10)
+    drag.Size = UDim2.new(0, 24, 0, 24)
+    drag.Position = UDim2.new((def - min) / (max - min), -12, 0.5, -12)
     drag.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
     drag.Text = ""
     drag.Parent = bar
@@ -826,7 +858,7 @@ local function slider(name, min, max, def, callback, parent)
             val = math.floor(min + (max - min) * pct)
             
             fill.Size = UDim2.new(pct, 0, 1, 0)
-            drag.Position = UDim2.new(pct, -10, 0.5, -10)
+            drag.Position = UDim2.new(pct, -12, 0.5, -12)
             label.Text = name .. ": " .. val
             
             callback(val)
@@ -836,53 +868,54 @@ end
 
 local function dropdown(name, opts, def, callback, parent)
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 60)
-    frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    frame.Size = UDim2.new(1, 0, 0, 65)
+    frame.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
     frame.BorderSizePixel = 0
     frame.Parent = parent or mainContent
     
     local fCorner = Instance.new("UICorner")
-    fCorner.CornerRadius = UDim.new(0, 8)
+    fCorner.CornerRadius = UDim.new(0, 10)
     fCorner.Parent = frame
     
     local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(1, -20, 0, 20)
-    label.Position = UDim2.new(0, 10, 0, 5)
+    label.Size = UDim2.new(1, -20, 0, 22)
+    label.Position = UDim2.new(0, 12, 0, 6)
     label.BackgroundTransparency = 1
     label.Text = name
-    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextColor3 = Color3.fromRGB(230, 230, 230)
     label.TextSize = 14
-    label.Font = Enum.Font.Gotham
+    label.Font = Enum.Font.GothamSemibold
     label.TextXAlignment = Enum.TextXAlignment.Left
     label.Parent = frame
     
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -20, 0, 25)
-    btn.Position = UDim2.new(0, 10, 0, 30)
-    btn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    btn.Size = UDim2.new(1, -24, 0, 28)
+    btn.Position = UDim2.new(0, 12, 0, 32)
+    btn.BackgroundColor3 = Color3.fromRGB(50, 50, 55)
     btn.Text = def
-    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    btn.TextSize = 14
+    btn.TextColor3 = Color3.fromRGB(230, 230, 230)
+    btn.TextSize = 13
     btn.Font = Enum.Font.Gotham
     btn.Parent = frame
     
     local bCorner = Instance.new("UICorner")
-    bCorner.CornerRadius = UDim.new(0, 6)
+    bCorner.CornerRadius = UDim.new(0, 7)
     bCorner.Parent = btn
     
     local list = Instance.new("ScrollingFrame")
-    list.Size = UDim2.new(1, -20, 0, 0)
-    list.Position = UDim2.new(0, 10, 0, 60)
-    list.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    list.Size = UDim2.new(1, -24, 0, 0)
+    list.Position = UDim2.new(0, 12, 0, 65)
+    list.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
     list.BorderSizePixel = 0
     list.Visible = false
     list.ZIndex = 10
     list.ScrollBarThickness = 4
-    list.CanvasSize = UDim2.new(0, 0, 0, #opts * 30)
+    list.ScrollBarImageColor3 = Color3.fromRGB(30, 144, 255)
+    list.CanvasSize = UDim2.new(0, 0, 0, #opts * 32)
     list.Parent = frame
     
     local lCorner = Instance.new("UICorner")
-    lCorner.CornerRadius = UDim.new(0, 6)
+    lCorner.CornerRadius = UDim.new(0, 7)
     lCorner.Parent = list
     
     local lLayout = Instance.new("UIListLayout")
@@ -892,50 +925,48 @@ local function dropdown(name, opts, def, callback, parent)
     btn.MouseButton1Click:Connect(function()
         list.Visible = not list.Visible
         if list.Visible then
-            local h = math.min(#opts * 30, 150)
-            frame.Size = UDim2.new(1, 0, 0, 60 + h)
-            list.Size = UDim2.new(1, -20, 0, h)
+            local h = math.min(#opts * 32, 160)
+            frame.Size = UDim2.new(1, 0, 0, 65 + h)
+            list.Size = UDim2.new(1, -24, 0, h)
         else
-            frame.Size = UDim2.new(1, 0, 0, 60)
+            frame.Size = UDim2.new(1, 0, 0, 65)
         end
     end)
     
     for _, opt in ipairs(opts) do
         local obtn = Instance.new("TextButton")
-        obtn.Size = UDim2.new(1, 0, 0, 28)
-        obtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        obtn.Size = UDim2.new(1, 0, 0, 30)
+        obtn.BackgroundColor3 = Color3.fromRGB(50, 50, 55)
         obtn.Text = opt
-        obtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        obtn.TextSize = 14
+        obtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+        obtn.TextSize = 13
         obtn.Font = Enum.Font.Gotham
         obtn.BorderSizePixel = 0
         obtn.Parent = list
         
         obtn.MouseEnter:Connect(function()
-            obtn.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
+            TweenService:Create(obtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(30, 144, 255)}):Play()
         end)
         
         obtn.MouseLeave:Connect(function()
-            obtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+            TweenService:Create(obtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(50, 50, 55)}):Play()
         end)
         
         obtn.MouseButton1Click:Connect(function()
             btn.Text = opt
             list.Visible = false
-            frame.Size = UDim2.new(1, 0, 0, 60)
+            frame.Size = UDim2.new(1, 0, 0, 65)
             callback(opt)
         end)
     end
 end
 
+-- Add main tab controls
 toggle("anti-afk", "⏰", function(on)
     state.antiAFK = on
     if on then
         setupAntiAFK()
         print("✅ anti-afk enabled")
-    else
-        disableAntiAFK()
-        print("❌ anti-afk disabled")
     end
 end)
 
@@ -1019,6 +1050,7 @@ toggle("pickup coal", "⚫", function(on)
     end
 end)
 
+-- Extra tab controls
 toggle("auto coin press", "🪙", function(on)
     state.coinPress = on
     if on then
@@ -1046,45 +1078,78 @@ toggle("tp raw gold to chest", "📦", function(on)
     if on then
         chest = getDeployable("Chest", 100)
         if not chest then
-            warn("no chest found within 100 studs")
+            warn("⚠️ no chest found within 100 studs - stand near a chest!")
             state.tpRawGoldToChest = false
+            return
+        end
+        print("✅ tp raw gold enabled - chest found!")
+        -- Start the loop directly
+        task.spawn(function()
+            tpRawGoldLoop()
+        end)
+    end
+end, extraContent)
+
+toggle("pickup gold from chest", "💎", function(on)
+    state.pickupGoldFromChest = on
+    if on then
+        chest = getDeployable("Chest", 100)
+        if not chest then
+            warn("no chest found within 100 studs")
+            state.pickupGoldFromChest = false
         else
-            tasks.tpRawGold = task.spawn(tpRawGoldLoop)
+            tasks.pickupGoldFromChest = task.spawn(pickupGoldFromChestLoop)
         end
     else
-        if tasks.tpRawGold then
-            task.cancel(tasks.tpRawGold)
+        if tasks.pickupGoldFromChest then
+            task.cancel(tasks.pickupGoldFromChest)
         end
     end
 end, extraContent)
 
+toggle("pickup coins (from press)", "🪙", function(on)
+    state.pickupCoins = on
+    if on then
+        tasks.pickupCoins = task.spawn(pickupCoinsLoop)
+    else
+        if tasks.pickupCoins then
+            task.cancel(tasks.pickupCoins)
+        end
+    end
+end, extraContent)
+
+-- Info panel
 local info = Instance.new("Frame")
-info.Size = UDim2.new(1, 0, 0, 60)
-info.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
-info.BackgroundTransparency = 0.8
+info.Size = UDim2.new(1, 0, 0, 65)
+info.BackgroundColor3 = Color3.fromRGB(30, 144, 255)
+info.BackgroundTransparency = 0.1
 info.BorderSizePixel = 0
 info.Parent = mainContent
 
 local iCorner = Instance.new("UICorner")
-iCorner.CornerRadius = UDim.new(0, 8)
+iCorner.CornerRadius = UDim.new(0, 10)
 iCorner.Parent = info
 
 local iLabel = Instance.new("TextLabel")
-iLabel.Size = UDim2.new(1, -20, 1, -20)
-iLabel.Position = UDim2.new(0, 10, 0, 10)
+iLabel.Size = UDim2.new(1, -24, 1, -20)
+iLabel.Position = UDim2.new(0, 12, 0, 10)
 iLabel.BackgroundTransparency = 1
-iLabel.Text = "ℹ️ loaded " .. #settings.positions .. " positions"
+iLabel.Text = "ℹ️ Loaded " .. #settings.positions .. " positions\n✨ Enjoy using Tween Hub!"
 iLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-iLabel.TextSize = 12
-iLabel.Font = Enum.Font.Gotham
+iLabel.TextSize = 13
+iLabel.Font = Enum.Font.GothamSemibold
 iLabel.TextWrapped = true
+iLabel.TextYAlignment = Enum.TextYAlignment.Top
 iLabel.Parent = info
 
+-- Dragging functionality
 local dragging, dragInput, dragStart, startPos
 
 local function update(input)
     local delta = input.Position - dragStart
-    main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    TweenService:Create(main, TweenInfo.new(0.1), {
+        Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    }):Play()
 end
 
 header.InputBegan:Connect(function(input)
@@ -1113,4 +1178,4 @@ UIS.InputChanged:Connect(function(input)
     end
 end)
 
-print("tween hub loaded!")
+print("✨ Tween Hub loaded successfully!")
