@@ -21,9 +21,9 @@ end)
 
 local DEFAULT_CONFIG = success and config or {waitTime = 1, heightOffset = 0, moveSpeed = 20, positions = {}}
 if success then
-    print("✅ Tween config loaded! (" .. #config.positions .. " positions)")
+    print("✅ tween config loaded! (" .. #config.positions .. " positions)")
 else
-    warn("❌ Config load failed")
+    warn("❌ config load failed")
 end
 
 local state = {
@@ -33,7 +33,10 @@ local state = {
     tween = false,
     pickupGold = false,
     pickupCoal = false,
-    antiAFK = false
+    antiAFK = false,
+    coinPress = false,
+    campfireFuel = false,
+    tpRawGoldToChest = false
 }
 
 local settings = {
@@ -41,18 +44,19 @@ local settings = {
     fruit = "Lemon",
     tweenSpeed = 18.6,
     waitTime = DEFAULT_CONFIG.waitTime or 0.1,
-    positions = DEFAULT_CONFIG.positions or {}
+    positions = DEFAULT_CONFIG.positions or {},
+    currentTab = "main"
 }
 
 local connections = {}
 local tasks = {}
+local chest = nil
 local HUNGER_CAP = 100
 local EAT_AT_OR_BELOW = 90
 local LOOP_WAIT_SECONDS = 1
 local POST_EAT_COOLDOWN = 2.0
 local lastEatTime = 0
 
--- Anti-AFK function
 local function setupAntiAFK()
     local GC = getconnections or get_signal_cons
     if GC then
@@ -63,25 +67,23 @@ local function setupAntiAFK()
                 v["Disconnect"](v)
             end
         end
-        print("✅ Anti-AFK: Idled connections disabled")
+        print("✅ anti-afk: connections disabled")
     else
         local VirtualUser = game:GetService("VirtualUser")
         Players.LocalPlayer.Idled:Connect(function()
             VirtualUser:CaptureController()
             VirtualUser:ClickButton2(Vector2.new())
         end)
-        print("✅ Anti-AFK: VirtualUser method enabled")
+        print("✅ anti-afk: virtual user enabled")
     end
 end
 
 local function disableAntiAFK()
-    -- Note: Once connections are disabled, they can't be easily re-enabled
-    -- This will mainly work for the VirtualUser method
     if connections.antiAFK then
         connections.antiAFK:Disconnect()
         connections.antiAFK = nil
     end
-    print("❌ Anti-AFK disabled")
+    print("❌ anti-afk disabled")
 end
 
 local fruitOptions = {}
@@ -101,8 +103,11 @@ LocalPlayer.CharacterAdded:Connect(function(char)
     Root = char:WaitForChild("HumanoidRootPart")
 end)
 
+local hitDebounce = false
 local function hitResources()
-    if not state.autoHit then return end
+    if not state.autoHit or hitDebounce then return end
+    hitDebounce = true
+    
     local entities = {}
     for _, res in ipairs(Workspace.Resources:GetChildren()) do
         if (Root.Position - res:GetPivot().Position).Magnitude <= settings.hitRadius then
@@ -113,6 +118,8 @@ local function hitResources()
     if #entities > 0 then
         Packets.SwingTool.send(entities)
     end
+    
+    task.delay(0.1, function() hitDebounce = false end)
 end
 
 local function noclip()
@@ -178,21 +185,20 @@ local function autoEat()
         local health = Character and Character:FindFirstChild("Humanoid") and Character.Humanoid.Health or 100
         
         if not settings.fruit then
-            warn("No fruit selected for auto-eat.")
+            warn("no fruit selected for auto-eat.")
         elseif not hunger then
-            warn("Hunger value unavailable right now.")
+            warn("hunger value unavailable.")
         else
             if (hunger <= EAT_AT_OR_BELOW or health <= 90) and canEatNow() then
                 local idx = findFruit(settings.fruit)
                 if idx then
                     local restore = getRestore(settings.fruit)
                     
-                    if restore and willOvereat(hunger, restore) and health > 90 then
-                    else
+                    if not (restore and willOvereat(hunger, restore) and health > 90) then
                         eatFruitOnce(idx)
                     end
                 else
-                    warn("Selected fruit not found in inventory: " .. tostring(settings.fruit))
+                    warn("fruit not found: " .. tostring(settings.fruit))
                 end
             end
         end
@@ -201,6 +207,7 @@ local function autoEat()
     end
 end
 
+local pickupDebounce = {}
 local function pickup(itemName)
     local enabled = itemName == "Raw Gold" and state.pickupGold or state.pickupCoal
     while enabled do
@@ -208,7 +215,8 @@ local function pickup(itemName)
         local items = Workspace:FindFirstChild("Items")
         if items then
             for _, item in ipairs(items:GetChildren()) do
-                if item.Name == itemName then
+                if item.Name == itemName and not pickupDebounce[item] then
+                    pickupDebounce[item] = true
                     local id = item:GetAttribute("EntityID")
                     local t = os.clock()
                     while not id and item.Parent == items and os.clock() - t < 1.5 do
@@ -222,6 +230,7 @@ local function pickup(itemName)
                             task.wait(0.03)
                         end
                     end
+                    task.delay(1, function() pickupDebounce[item] = nil end)
                 end
             end
         end
@@ -229,9 +238,142 @@ local function pickup(itemName)
     end
 end
 
+local function getDeployable(name, range)
+    local deployablesFolder = Workspace:FindFirstChild("Deployables")
+    if not deployablesFolder or not Root then return nil end
+    
+    range = tonumber(range) or math.huge
+    local closest, closestDist = nil, range
+    
+    for _, v in ipairs(deployablesFolder:GetChildren()) do
+        if v.Name == name and v:IsA("Model") then
+            local ok, pivot = pcall(function() return v:GetPivot() end)
+            if ok and pivot then
+                local dist = (Root.Position - pivot.Position).Magnitude
+                if dist < closestDist then
+                    closest, closestDist = v, dist
+                end
+            end
+        end
+    end
+    return closest
+end
+
+local function getQuantity(name)
+    for x, v in next, GameUtil.getData().inventory do
+        if v.name == name then
+            return v.quantity, x
+        end
+    end
+    return 0
+end
+
+local SEND_DT = 0.02
+local LOOKUP_DT = 2
+local BURST_MAX = 5
+
+local function pressCoins()
+    local press, entityID, lastLookup, lastSend = nil, nil, 0, 0
+
+    while state.coinPress do
+        local now = os.clock()
+
+        if (not press or not press.Parent or (now - lastLookup) >= LOOKUP_DT) then
+            press = getDeployable("Coin Press", 25)
+            entityID = (press and press:GetAttribute("EntityID")) or nil
+            lastLookup = now
+        end
+
+        if entityID then
+            local goldAmt = getQuantity("Gold") or 0
+            if goldAmt > 0 and (now - lastSend) >= SEND_DT then
+                local n = math.min(goldAmt, BURST_MAX)
+                for i = 1, n do
+                    Packets.InteractStructure.send({ entityID = entityID, itemID = ItemIDS.Gold })
+                end
+                lastSend = now
+            end
+        end
+
+        RunService.Heartbeat:Wait()
+    end
+end
+
+local function campfireRefuelLoop()
+    while state.campfireFuel do
+        local campfires = {}
+        local deployablesFolder = Workspace:FindFirstChild("Deployables")
+        
+        if deployablesFolder and Root then
+            for _, v in ipairs(deployablesFolder:GetChildren()) do
+                if v.Name == "Campfire" and v:IsA("Model") then
+                    local ok, pivot = pcall(function() return v:GetPivot() end)
+                    if ok and pivot then
+                        local dist = (Root.Position - pivot.Position).Magnitude
+                        if dist < 30 then
+                            table.insert(campfires, { deployable = v, range = dist })
+                        end
+                    end
+                end
+            end
+        end
+        
+        for _, rec in ipairs(campfires) do
+            local d = rec.deployable
+            local board = d:FindFirstChild("Board")
+            local bb = board and board:FindFirstChild("Billboard")
+            local back = bb and bb:FindFirstChild("Backdrop")
+            local tl = back and back:FindFirstChild("TextLabel")
+            local secondsLeft = tonumber(tl and tl.Text) or 999
+
+            if secondsLeft <= 10 then
+                local coalQty = getQuantity("Coal")
+                if coalQty > 0 then
+                    Packets.InteractStructure.send({
+                        entityID = d:GetAttribute("EntityID"),
+                        itemID = ItemIDS.Coal
+                    })
+                    task.wait(0.05)
+                end
+            end
+        end
+        task.wait(0.25)
+    end
+end
+
+local function tpRawGoldLoop()
+    while state.tpRawGoldToChest do
+        if not chest or not chest.Parent then
+            chest = getDeployable("Chest", 100)
+            if not chest then
+                warn("no chest found nearby")
+                task.wait(1)
+                continue
+            end
+        end
+        
+        local items = Workspace:FindFirstChild("Items")
+        if items then
+            for _, item in ipairs(items:GetChildren()) do
+                if item.Name == "Raw Gold" and item.Parent == items then
+                    local id = item:GetAttribute("EntityID")
+                    if id then
+                        Packets.ForceInteract.send(id)
+                        pcall(function() 
+                            item:PivotTo(chest:GetPivot()) 
+                        end)
+                        Packets.ForceInteract.send()
+                    end
+                end
+            end
+        end
+        task.wait(0.1)
+    end
+end
+
 local function tweenPath()
     if #settings.positions == 0 then
-        warn("No positions loaded!")
+        warn("no positions loaded!")
         state.tween = false
         return
     end
@@ -463,7 +605,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -20, 1, 0)
 title.Position = UDim2.new(0, 10, 0, 0)
 title.BackgroundTransparency = 1
-title.Text = "Tween"
+title.Text = "tween hub"
 title.TextColor3 = Color3.fromRGB(255, 255, 255)
 title.TextSize = 24
 title.Font = Enum.Font.GothamBold
@@ -488,24 +630,91 @@ close.MouseButton1Click:Connect(function()
     gui:Destroy()
 end)
 
+local tabContainer = Instance.new("Frame")
+tabContainer.Size = UDim2.new(1, -20, 0, 40)
+tabContainer.Position = UDim2.new(0, 10, 0, 60)
+tabContainer.BackgroundTransparency = 1
+tabContainer.Parent = main
+
+local tabLayout = Instance.new("UIListLayout")
+tabLayout.FillDirection = Enum.FillDirection.Horizontal
+tabLayout.Padding = UDim.new(0, 5)
+tabLayout.Parent = tabContainer
+
 local scroll = Instance.new("ScrollingFrame")
-scroll.Size = UDim2.new(1, -20, 1, -70)
-scroll.Position = UDim2.new(0, 10, 0, 60)
+scroll.Size = UDim2.new(1, -20, 1, -120)
+scroll.Position = UDim2.new(0, 10, 0, 110)
 scroll.BackgroundTransparency = 1
 scroll.BorderSizePixel = 0
 scroll.ScrollBarThickness = 6
 scroll.Parent = main
 
-local layout = Instance.new("UIListLayout")
-layout.Padding = UDim.new(0, 10)
-layout.Parent = scroll
+local mainContent = Instance.new("Frame")
+mainContent.Size = UDim2.new(1, 0, 1, 0)
+mainContent.BackgroundTransparency = 1
+mainContent.Visible = true
+mainContent.Parent = scroll
 
-local function toggle(name, icon, callback)
+local extraContent = Instance.new("Frame")
+extraContent.Size = UDim2.new(1, 0, 1, 0)
+extraContent.BackgroundTransparency = 1
+extraContent.Visible = false
+extraContent.Parent = scroll
+
+local mainLayout = Instance.new("UIListLayout")
+mainLayout.Padding = UDim.new(0, 10)
+mainLayout.Parent = mainContent
+
+local extraLayout = Instance.new("UIListLayout")
+extraLayout.Padding = UDim.new(0, 10)
+extraLayout.Parent = extraContent
+
+local function createTab(name, icon)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 120, 1, 0)
+    btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    btn.Text = icon .. " " .. name
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.TextSize = 14
+    btn.Font = Enum.Font.Gotham
+    btn.Parent = tabContainer
+    
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 6)
+    btnCorner.Parent = btn
+    
+    btn.MouseButton1Click:Connect(function()
+        mainContent.Visible = false
+        extraContent.Visible = false
+        
+        for _, child in ipairs(tabContainer:GetChildren()) do
+            if child:IsA("TextButton") then
+                child.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+            end
+        end
+        
+        if name == "main" then
+            mainContent.Visible = true
+        elseif name == "extra" then
+            extraContent.Visible = true
+        end
+        
+        btn.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
+        settings.currentTab = name
+    end)
+    
+    return btn
+end
+
+createTab("main", "🏠")
+createTab("extra", "⚙️")
+
+local function toggle(name, icon, callback, parent)
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, 0, 0, 60)
     frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
     frame.BorderSizePixel = 0
-    frame.Parent = scroll
+    frame.Parent = parent or mainContent
     
     local fCorner = Instance.new("UICorner")
     fCorner.CornerRadius = UDim.new(0, 8)
@@ -526,7 +735,7 @@ local function toggle(name, icon, callback)
     btn.Size = UDim2.new(0, 50, 0, 25)
     btn.Position = UDim2.new(1, -60, 0.5, -12.5)
     btn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-    btn.Text = "OFF"
+    btn.Text = "off"
     btn.TextColor3 = Color3.fromRGB(255, 255, 255)
     btn.TextSize = 14
     btn.Font = Enum.Font.GothamBold
@@ -539,18 +748,18 @@ local function toggle(name, icon, callback)
     local on = false
     btn.MouseButton1Click:Connect(function()
         on = not on
-        btn.Text = on and "ON" or "OFF"
+        btn.Text = on and "on" or "off"
         btn.BackgroundColor3 = on and Color3.fromRGB(218, 165, 32) or Color3.fromRGB(60, 60, 60)
         callback(on)
     end)
 end
 
-local function slider(name, min, max, def, callback)
+local function slider(name, min, max, def, callback, parent)
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, 0, 0, 80)
     frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
     frame.BorderSizePixel = 0
-    frame.Parent = scroll
+    frame.Parent = parent or mainContent
     
     local fCorner = Instance.new("UICorner")
     fCorner.CornerRadius = UDim.new(0, 8)
@@ -628,12 +837,12 @@ local function slider(name, min, max, def, callback)
     end)
 end
 
-local function dropdown(name, opts, def, callback)
+local function dropdown(name, opts, def, callback, parent)
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, 0, 0, 60)
     frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
     frame.BorderSizePixel = 0
-    frame.Parent = scroll
+    frame.Parent = parent or mainContent
     
     local fCorner = Instance.new("UICorner")
     fCorner.CornerRadius = UDim.new(0, 8)
@@ -722,19 +931,18 @@ local function dropdown(name, opts, def, callback)
     end
 end
 
--- Anti-AFK toggle
-toggle("Anti-AFK", "⏰", function(on)
+toggle("anti-afk", "⏰", function(on)
     state.antiAFK = on
     if on then
         setupAntiAFK()
-        print("✅ Anti-AFK enabled")
+        print("✅ anti-afk enabled")
     else
         disableAntiAFK()
-        print("❌ Anti-AFK disabled")
+        print("❌ anti-afk disabled")
     end
 end)
 
-toggle("Auto Hit Resources", "🔨", function(on)
+toggle("auto hit resources", "🔨", function(on)
     state.autoHit = on
     if on then
         connections.autoHit = RunService.Heartbeat:Connect(hitResources)
@@ -745,11 +953,11 @@ toggle("Auto Hit Resources", "🔨", function(on)
     end
 end)
 
-slider("Hit Radius", 10, 200, settings.hitRadius, function(v)
+slider("hit radius", 10, 200, settings.hitRadius, function(v)
     settings.hitRadius = v
 end)
 
-toggle("Noclip (Doors & Boards)", "👻", function(on)
+toggle("noclip (doors & boards)", "👻", function(on)
     state.noclip = on
     noclip()
     if on then
@@ -762,11 +970,11 @@ toggle("Noclip (Doors & Boards)", "👻", function(on)
     end
 end)
 
-dropdown("Select Fruit", fruitOptions, settings.fruit, function(fruit)
+dropdown("select fruit", fruitOptions, settings.fruit, function(fruit)
     settings.fruit = fruit
 end)
 
-toggle("Auto Eat/Heal", "🍎", function(on)
+toggle("auto eat/heal", "🍎", function(on)
     state.autoEat = on
     if on then
         tasks.autoEat = task.spawn(autoEat)
@@ -777,7 +985,7 @@ toggle("Auto Eat/Heal", "🍎", function(on)
     end
 end)
 
-toggle("Position Tween", "🧭", function(on)
+toggle("position tween", "🧭", function(on)
     state.tween = on
     if on then
         task.spawn(tweenPath)
@@ -788,11 +996,11 @@ toggle("Position Tween", "🧭", function(on)
     end
 end)
 
-slider("Wait Time (seconds)", 0, 10, settings.waitTime, function(v)
+slider("wait time (seconds)", 0, 10, settings.waitTime, function(v)
     settings.waitTime = v
 end)
 
-toggle("Pickup Raw Gold", "💰", function(on)
+toggle("pickup raw gold", "💰", function(on)
     state.pickupGold = on
     if on then
         tasks.pickupGold = task.spawn(function() pickup("Raw Gold") end)
@@ -803,7 +1011,7 @@ toggle("Pickup Raw Gold", "💰", function(on)
     end
 end)
 
-toggle("Pickup Coal", "⚫", function(on)
+toggle("pickup coal", "⚫", function(on)
     state.pickupCoal = on
     if on then
         tasks.pickupCoal = task.spawn(function() pickup("Coal") end)
@@ -814,12 +1022,51 @@ toggle("Pickup Coal", "⚫", function(on)
     end
 end)
 
+toggle("auto coin press", "🪙", function(on)
+    state.coinPress = on
+    if on then
+        tasks.coinPress = task.spawn(pressCoins)
+    else
+        if tasks.coinPress then
+            task.cancel(tasks.coinPress)
+        end
+    end
+end, extraContent)
+
+toggle("auto fuel campfire", "🔥", function(on)
+    state.campfireFuel = on
+    if on then
+        tasks.campfireFuel = task.spawn(campfireRefuelLoop)
+    else
+        if tasks.campfireFuel then
+            task.cancel(tasks.campfireFuel)
+        end
+    end
+end, extraContent)
+
+toggle("tp raw gold to chest", "📦", function(on)
+    state.tpRawGoldToChest = on
+    if on then
+        chest = getDeployable("Chest", 100)
+        if not chest then
+            warn("no chest found within 100 studs")
+            state.tpRawGoldToChest = false
+        else
+            tasks.tpRawGold = task.spawn(tpRawGoldLoop)
+        end
+    else
+        if tasks.tpRawGold then
+            task.cancel(tasks.tpRawGold)
+        end
+    end
+end, extraContent)
+
 local info = Instance.new("Frame")
 info.Size = UDim2.new(1, 0, 0, 60)
 info.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
 info.BackgroundTransparency = 0.8
 info.BorderSizePixel = 0
-info.Parent = scroll
+info.Parent = mainContent
 
 local iCorner = Instance.new("UICorner")
 iCorner.CornerRadius = UDim.new(0, 8)
@@ -829,7 +1076,7 @@ local iLabel = Instance.new("TextLabel")
 iLabel.Size = UDim2.new(1, -20, 1, -20)
 iLabel.Position = UDim2.new(0, 10, 0, 10)
 iLabel.BackgroundTransparency = 1
-iLabel.Text = "ℹ️ Loaded " .. #settings.positions .. " positions"
+iLabel.Text = "ℹ️ loaded " .. #settings.positions .. " positions"
 iLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
 iLabel.TextSize = 12
 iLabel.Font = Enum.Font.Gotham
@@ -869,4 +1116,4 @@ UIS.InputChanged:Connect(function(input)
     end
 end)
 
-print("Tween Hub loaded!")
+print("tween hub loaded!")
