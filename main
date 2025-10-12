@@ -219,17 +219,6 @@ local function tweenPath()
     end
     
     local idx = nearestIndex(Root.Position)
-    local RUBBER_TELEPORT_DIST = 20
-    local RUBBER_SETTLE_TIME = 0.5
-    
-    -- Make character non-collidable during tween for smooth movement
-    if state.noclip and Character then
-        for _, part in ipairs(Character:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.CanCollide = false
-            end
-        end
-    end
     
     while state.tween do
         if not Root or not Root.Parent then
@@ -248,22 +237,17 @@ local function tweenPath()
         local dist = (startPos - target).Magnitude
         local duration = dist / settings.tweenSpeed
         
+        -- Add minimum duration to prevent too-fast tweens
+        duration = math.max(duration, 1.0)
+        
         if connections.tween then
             connections.tween:Cancel()
         end
         
-        -- Set HumanoidRootPart to Massless and adjust anchoring
-        Root.Massless = true
-        
-        -- Add minimum duration to prevent too-fast tweens
-        local minDuration = 1.5
-        duration = math.max(duration, minDuration)
-        
-        local info = TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut)
+        local info = TweenInfo.new(duration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
         connections.tween = TweenService:Create(Root, info, {CFrame = CFrame.new(target)})
         
         local completed = false
-        local rubberbanded = false
         
         local conn
         conn = connections.tween.Completed:Connect(function()
@@ -273,55 +257,22 @@ local function tweenPath()
         
         connections.tween:Play()
         
-        local lastPos = startPos
-        local t0 = tick()
-        
+        -- Wait for completion or state change
         while state.tween and not completed do
             task.wait(0.1)
-            
-            if not Root or not Root.Parent then break end
-            
-            local curPos = Root.Position
-            local stepDist = (curPos - lastPos).Magnitude
-            
-            if stepDist >= RUBBER_TELEPORT_DIST then
-                rubberbanded = true
-                break
-            end
-            
-            local elapsed = tick() - t0
-            local alpha = math.clamp(elapsed / duration, 0, 1)
-            local expectPos = startPos:Lerp(target, alpha)
-            local deviation = (curPos - expectPos).Magnitude
-            
-            if deviation >= 12 then
-                rubberbanded = true
-                break
-            end
-            
-            lastPos = curPos
         end
         
         if conn then conn:Disconnect() end
-        if connections.tween then connections.tween:Cancel() end
         
-        if rubberbanded then
-            warn("Rubberband detected! Repositioning...")
-            Root.Massless = false
-            task.wait(RUBBER_SETTLE_TIME)
-            idx = nearestIndex(Root.Position)
-            Root.Anchored = false
-            task.wait(0.2)
-            Root.Massless = true
-            continue
-        end
-        
+        -- Move to next position
         idx = idx % #settings.positions + 1
-        task.wait(math.max(settings.waitTime, 0.5))
+        task.wait(settings.waitTime)
     end
     
-    -- Restore default physics
-    Root.Massless = false
+    -- Cancel any remaining tween
+    if connections.tween then
+        connections.tween:Cancel()
+    end
 end
 
 local gui = Instance.new("ScreenGui")
@@ -671,7 +622,6 @@ toggle("Position Tween", "🧭", function(on)
         if connections.tween then
             connections.tween:Cancel()
         end
-        Root.Massless = false
     end
 end)
 
