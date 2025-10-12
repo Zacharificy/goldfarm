@@ -38,7 +38,7 @@ local state = {
 local settings = {
     hitRadius = 100,
     fruit = "Lemon",
-    tweenSpeed = DEFAULT_CONFIG.moveSpeed or 20,
+    tweenSpeed = 20,
     waitTime = DEFAULT_CONFIG.waitTime or 0.1,
     positions = DEFAULT_CONFIG.positions or {}
 }
@@ -133,18 +133,19 @@ end
 local function autoEat()
     while state.autoEat do
         local hunger = getHunger()
+        local health = Character and Character:FindFirstChild("Humanoid") and Character.Humanoid.Health or 100
         
         if not settings.fruit then
             warn("No fruit selected for auto-eat.")
         elseif not hunger then
             warn("Hunger value unavailable right now.")
         else
-            if hunger <= EAT_AT_OR_BELOW and canEatNow() then
+            if (hunger <= EAT_AT_OR_BELOW or health <= 90) and canEatNow() then
                 local idx = findFruit(settings.fruit)
                 if idx then
                     local restore = getRestore(settings.fruit)
                     
-                    if restore and willOvereat(hunger, restore) then
+                    if restore and willOvereat(hunger, restore) and health > 90 then
                     else
                         eatFruitOnce(idx)
                     end
@@ -168,21 +169,21 @@ local function pickup(itemName)
                 if item.Name == itemName then
                     local id = item:GetAttribute("EntityID")
                     local t = os.clock()
-                    while not id and item.Parent == items and os.clock() - t < 3 do
+                    while not id and item.Parent == items and os.clock() - t < 1.5 do
                         task.wait()
                         id = item:GetAttribute("EntityID")
                     end
                     if id then
-                        for i = 1, 8 do
+                        for i = 1, 12 do
                             if not item or item.Parent ~= items then break end
                             Packets.Pickup.send(id)
-                            task.wait(0.12)
+                            task.wait(0.03)
                         end
                     end
                 end
             end
         end
-        task.wait(0.25)
+        task.wait(0.05)
     end
 end
 
@@ -193,7 +194,22 @@ local function tweenPath()
         return
     end
     
-    local idx = 1
+    local function nearestIndex(fromPos)
+        local bestI, bestD = 1, math.huge
+        for j = 1, #settings.positions do
+            local p = settings.positions[j]
+            if p and p.X and p.Y and p.Z then
+                local d = (fromPos - Vector3.new(p.X, p.Y, p.Z)).Magnitude
+                if d < bestD then bestI, bestD = j, d end
+            end
+        end
+        return bestI
+    end
+    
+    local idx = nearestIndex(Root.Position)
+    local RUBBER_TELEPORT_DIST = 15
+    local RUBBER_SETTLE_TIME = 0.3
+    
     while state.tween do
         if not Root or not Root.Parent then
             task.wait(1)
@@ -207,21 +223,69 @@ local function tweenPath()
         end
         
         local target = Vector3.new(pos.X, pos.Y, pos.Z)
-        local dist = (Root.Position - target).Magnitude
+        local startPos = Root.Position
+        local dist = (startPos - target).Magnitude
         local duration = dist / settings.tweenSpeed
         
         if connections.tween then
             connections.tween:Cancel()
         end
         
-        local info = TweenInfo.new(duration, Enum.EasingStyle.Linear)
+        local info = TweenInfo.new(duration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
         connections.tween = TweenService:Create(Root, info, {CFrame = CFrame.new(target)})
-        connections.tween:Play()
-        connections.tween.Completed:Wait()
         
-        task.wait(settings.waitTime)
+        local completed = false
+        local rubberbanded = false
+        
+        local conn
+        conn = connections.tween.Completed:Connect(function()
+            completed = true
+            if conn then conn:Disconnect() end
+        end)
+        
+        connections.tween:Play()
+        
+        local lastPos = startPos
+        local t0 = tick()
+        
+        while state.tween and not completed do
+            task.wait(0.1)
+            
+            local curPos = Root.Position
+            local stepDist = (curPos - lastPos).Magnitude
+            
+            if stepDist >= RUBBER_TELEPORT_DIST then
+                rubberbanded = true
+                break
+            end
+            
+            local elapsed = tick() - t0
+            local alpha = math.clamp(elapsed / duration, 0, 1)
+            local expectPos = startPos:Lerp(target, alpha)
+            local deviation = (curPos - expectPos).Magnitude
+            
+            if deviation >= 8 then
+                rubberbanded = true
+                break
+            end
+            
+            lastPos = curPos
+        end
+        
+        if conn then conn:Disconnect() end
+        if connections.tween then connections.tween:Cancel() end
+        
+        if rubberbanded then
+            warn("Rubberband detected! Repositioning...")
+            task.wait(RUBBER_SETTLE_TIME)
+            idx = nearestIndex(Root.Position)
+            Root.Anchored = false
+            task.wait(0.1)
+            continue
+        end
         
         idx = idx % #settings.positions + 1
+        task.wait(0.01)
     end
 end
 
@@ -553,7 +617,7 @@ dropdown("Select Fruit", fruitOptions, settings.fruit, function(fruit)
     settings.fruit = fruit
 end)
 
-toggle("Auto Eat", "🍎", function(on)
+toggle("Auto Eat/Heal", "🍎", function(on)
     state.autoEat = on
     if on then
         tasks.autoEat = task.spawn(autoEat)
@@ -575,11 +639,11 @@ toggle("Position Tween", "🧭", function(on)
     end
 end)
 
-slider("Tween Speed", 1, 24, settings.tweenSpeed, function(v)
-    settings.tweenSpeed = v
+local speedDropdown = dropdown("Tween Speed", {"19", "20"}, "20", function(speed)
+    settings.tweenSpeed = tonumber(speed) or 20
 end)
 
-slider("Wait Time (seconds)", 0, 20, settings.waitTime * 10, function(v)
+slider("Wait Time (seconds)", 0, 10, settings.waitTime * 10, function(v)
     settings.waitTime = v / 10
 end)
 
