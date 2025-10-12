@@ -38,7 +38,7 @@ local state = {
 local settings = {
     hitRadius = 100,
     fruit = "Lemon",
-    tweenSpeed = 20,
+    tweenSpeed = 18.6,
     waitTime = DEFAULT_CONFIG.waitTime or 0.1,
     positions = DEFAULT_CONFIG.positions or {}
 }
@@ -83,7 +83,6 @@ local function hitResources()
 end
 
 local function noclip()
-    -- Handle doors
     for _, v in workspace.Deployables:GetChildren() do
         local door = v:FindFirstChild("Door")
         if door then
@@ -92,7 +91,6 @@ local function noclip()
         end
     end
     
-    -- Handle Old Boards - only when NOT tweening to prevent conflicts
     if state.noclip and not state.tween then
         for _, v in workspace.Resources:GetChildren() do
             if v.Name == "Old Boards" then
@@ -101,7 +99,6 @@ local function noclip()
         end
     end
     
-    -- Make character parts non-collidable during noclip
     if state.noclip and Character then
         for _, part in ipairs(Character:GetDescendants()) do
             if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
@@ -205,7 +202,7 @@ local function tweenPath()
         state.tween = false
         return
     end
-    
+
     local function nearestIndex(fromPos)
         local bestI, bestD = 1, math.huge
         for j = 1, #settings.positions do
@@ -217,67 +214,183 @@ local function tweenPath()
         end
         return bestI
     end
-    
-    local idx = nearestIndex(Root.Position)
-    
-    -- Disable character physics for smooth tweening
-    if Humanoid then
-        Humanoid:ChangeState(Enum.HumanoidStateType.Physics)
-    end
-    
+
+    local curIndex = nearestIndex(Root.Position)
+    local fails = table.create(#settings.positions, 0)
+    local rbCount = table.create(#settings.positions, 0)
+
+    local REACH_RADIUS = 4
+    local MIN_IMPROVE_STUDS = 0.75
+    local NO_PROGRESS_SECS = 2.5
+    local TELEPORT_BACK_DINC = 8
+    local TELEPORT_STEP_JUMP = 15
+    local RUBBER_DEV_STUDS = 6
+    local SETTLE_SECS = 0.40
+    local MAX_RB_PER_NODE = 3
+    local JUMP_SAMPLE_SECS = 0.20
+
     while state.tween do
-        if not Root or not Root.Parent then
+        if not Root or not Root.Parent or not Humanoid or not Humanoid.Parent then
             task.wait(1)
             continue
         end
-        
-        local pos = settings.positions[idx]
-        if not pos then
-            idx = 1
+
+        if curIndex < 1 or curIndex > #settings.positions then
+            curIndex = 1
+        end
+
+        local pos = settings.positions[curIndex]
+        if not (pos and pos.X and pos.Y and pos.Z) then
+            curIndex = (curIndex % #settings.positions) + 1
+            task.wait(0.05)
             continue
         end
-        
-        local target = Vector3.new(pos.X, pos.Y, pos.Z)
-        local dist = (Root.Position - target).Magnitude
-        local speed = 18
-        local duration = dist / speed
-        
+
+        local targetPos = Vector3.new(pos.X, pos.Y, pos.Z)
+        local startPos = Root.Position
+        local dist = (startPos - targetPos).Magnitude
+        local speed = 18.6
+        local MAX_TRAVEL_SECS = math.max(15, dist / (speed * 0.6))
+        local duration = math.max(0.02, dist / speed)
+
+        if connections.tweenConn then
+            connections.tweenConn:Disconnect()
+            connections.tweenConn = nil
+        end
         if connections.tween then
             connections.tween:Cancel()
+            connections.tween = nil
         end
-        
-        -- Use bodyvelocity approach for constant speed
-        Root.Anchored = false
-        Root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        
-        local info = TweenInfo.new(duration, Enum.EasingStyle.Linear)
-        connections.tween = TweenService:Create(Root, info, {CFrame = CFrame.new(target)})
-        
-        local completed = false
-        
-        local conn
-        conn = connections.tween.Completed:Connect(function()
+
+        local ti = TweenInfo.new(duration, Enum.EasingStyle.Linear)
+        connections.tween = TweenService:Create(Root, ti, {CFrame = CFrame.new(targetPos)})
+
+        local completed, restartToNext, rubberbanded = false, false, false
+        local jumpOuter = false
+
+        local t0 = tick()
+        local lastPoll = t0
+        local lastPos = startPos
+        local lastDist = (lastPos - targetPos).Magnitude
+
+        connections.tweenConn = connections.tween.Completed:Connect(function()
             completed = true
-            if conn then conn:Disconnect() end
+            if connections.tweenConn then
+                connections.tweenConn:Disconnect()
+                connections.tweenConn = nil
+            end
         end)
-        
+
         connections.tween:Play()
-        
+
         while state.tween and not completed do
-            task.wait(0.1)
+            task.wait(JUMP_SAMPLE_SECS)
+
+            local now = tick()
+            local elapsed = now - t0
+            local alpha = math.clamp(elapsed / duration, 0, 1)
+
+            local curPos = Root.Position
+            local curDist = (curPos - targetPos).Magnitude
+
+            if curDist <= REACH_RADIUS then
+                completed = true
+                break
+            end
+
+            local stepJump = (curPos - lastPos).Magnitude
+            if (curDist - lastDist) >= TELEPORT_BACK_DINC or stepJump >= TELEPORT_STEP_JUMP then
+                rubberbanded = true
+            end
+
+            do
+                local expectPos = startPos:Lerp(targetPos, alpha)
+                local dev = (curPos - expectPos).Magnitude
+                if dev >= RUBBER_DEV_STUDS then
+                    local vmag = Root.AssemblyLinearVelocity.Magnitude
+                    if vmag < 1 or dev > (RUBBER_DEV_STUDS * 1.5) then
+                        rubberbanded = true
+                    end
+                end
+            end
+
+            if (now - t0) > MAX_TRAVEL_SECS or ((now - lastPoll) > NO_PROGRESS_SECS and (lastDist - curDist) < MIN_IMPROVE_STUDS) then
+                restartToNext = true
+                break
+            end
+
+            if rubberbanded then
+                if connections.tweenConn then
+                    connections.tweenConn:Disconnect()
+                    connections.tweenConn = nil
+                end
+                if connections.tween then
+                    connections.tween:Cancel()
+                    connections.tween = nil
+                end
+
+                task.wait(SETTLE_SECS)
+                local serverPos = Root.Position
+                local newIndex = nearestIndex(serverPos)
+
+                rbCount[curIndex] = (rbCount[curIndex] or 0) + 1
+                if rbCount[curIndex] >= MAX_RB_PER_NODE then
+                    rbCount[curIndex] = 0
+                    curIndex = (curIndex % #settings.positions) + 1
+                else
+                    curIndex = newIndex
+                end
+
+                Root.Anchored = false
+                task.wait(0.1)
+                jumpOuter = true
+                break
+            end
+
+            lastPoll = now
+            lastDist = curDist
+            lastPos = curPos
         end
-        
-        if conn then conn:Disconnect() end
-        if connections.tween then connections.tween:Cancel() end
-        
-        idx = idx % #settings.positions + 1
-        task.wait(0.01)
+
+        if connections.tweenConn then
+            connections.tweenConn:Disconnect()
+            connections.tweenConn = nil
+        end
+        if connections.tween then
+            connections.tween:Cancel()
+            connections.tween = nil
+        end
+
+        if jumpOuter then
+            continue
+        end
+
+        if restartToNext then
+            fails[curIndex] = (fails[curIndex] or 0) + 1
+            if fails[curIndex] >= 3 then
+                fails[curIndex] = 0
+            end
+            curIndex = (curIndex % #settings.positions) + 1
+            Root.Anchored = false
+            task.wait(0.15)
+            continue
+        end
+
+        fails[curIndex] = 0
+        rbCount[curIndex] = 0
+        curIndex = (curIndex % #settings.positions) + 1
+        task.wait(settings.waitTime or 0.1)
     end
-    
-    -- Restore normal humanoid state
-    if Humanoid then
-        Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+
+    if connections.tweenConn then
+        connections.tweenConn:Disconnect()
+        connections.tweenConn = nil
     end
+    if connections.tween then
+        connections.tween:Cancel()
+        connections.tween = nil
+    end
+    Root.Anchored = false
 end
 
 local gui = Instance.new("ScreenGui")
@@ -628,10 +741,6 @@ toggle("Position Tween", "🧭", function(on)
             connections.tween:Cancel()
         end
     end
-end)
-
-local speedDropdown = dropdown("Tween Speed", {"19", "20"}, "20", function(speed)
-    settings.tweenSpeed = tonumber(speed) or 20
 end)
 
 slider("Wait Time (seconds)", 0, 10, settings.waitTime, function(v)
