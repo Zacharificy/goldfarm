@@ -255,6 +255,10 @@ local function tweenPath()
         -- Set HumanoidRootPart to Massless and adjust anchoring
         Root.Massless = true
         
+        -- Add minimum duration to prevent too-fast tweens
+        local minDuration = 1.5
+        duration = math.max(duration, minDuration)
+        
         local info = TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut)
         connections.tween = TweenService:Create(Root, info, {CFrame = CFrame.new(target)})
         
@@ -313,7 +317,7 @@ local function tweenPath()
         end
         
         idx = idx % #settings.positions + 1
-        task.wait(settings.waitTime)
+        task.wait(math.max(settings.waitTime, 0.5))
     end
     
     -- Restore default physics
