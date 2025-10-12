@@ -220,7 +220,7 @@ local function tweenPath()
     
     local idx = nearestIndex(Root.Position)
     
-    -- Disable character physics for smooth tweening
+    -- Disable swimming/climbing states
     if Humanoid then
         Humanoid:ChangeState(Enum.HumanoidStateType.Physics)
     end
@@ -239,15 +239,15 @@ local function tweenPath()
         
         local target = Vector3.new(pos.X, pos.Y, pos.Z)
         local dist = (Root.Position - target).Magnitude
-        local speed = 18
+        local speed = 19
         local duration = dist / speed
         
         if connections.tween then
             connections.tween:Cancel()
         end
         
-        -- Use bodyvelocity approach for constant speed
-        Root.Anchored = false
+        -- Anchor to prevent physics interference
+        Root.Anchored = true
         Root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         
         local info = TweenInfo.new(duration, Enum.EasingStyle.Linear)
@@ -274,7 +274,8 @@ local function tweenPath()
         task.wait(0.01)
     end
     
-    -- Restore normal humanoid state
+    -- Restore normal state and unanchor
+    Root.Anchored = false
     if Humanoid then
         Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
     end
