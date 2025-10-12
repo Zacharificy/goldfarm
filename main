@@ -268,9 +268,9 @@ local function getQuantity(name)
     return 0
 end
 
-local SEND_DT = 0.02
-local LOOKUP_DT = 2
-local BURST_MAX = 5
+local SEND_DT = 0.01
+local LOOKUP_DT = 1
+local BURST_MAX = 10
 
 local function pressCoins()
     local press, entityID, lastLookup, lastSend = nil, nil, 0, 0
@@ -295,13 +295,12 @@ local function pressCoins()
             end
         end
 
-        RunService.Heartbeat:Wait()
+        task.wait(0.01)
     end
 end
 
 local function campfireRefuelLoop()
     while state.campfireFuel do
-        local campfires = {}
         local deployablesFolder = Workspace:FindFirstChild("Deployables")
         
         if deployablesFolder and Root then
@@ -311,29 +310,27 @@ local function campfireRefuelLoop()
                     if ok and pivot then
                         local dist = (Root.Position - pivot.Position).Magnitude
                         if dist < 30 then
-                            table.insert(campfires, { deployable = v, range = dist })
+                            local board = v:FindFirstChild("Board")
+                            local bb = board and board:FindFirstChild("Billboard")
+                            local back = bb and bb:FindFirstChild("Backdrop")
+                            local tl = back and back:FindFirstChild("TextLabel")
+                            local secondsLeft = tonumber(tl and tl.Text) or 999
+
+                            if secondsLeft <= 10 then
+                                local coalQty = getQuantity("Coal")
+                                if coalQty > 0 then
+                                    local entityID = v:GetAttribute("EntityID")
+                                    if entityID then
+                                        Packets.InteractStructure.send({
+                                            entityID = entityID,
+                                            itemID = ItemIDS.Coal
+                                        })
+                                        task.wait(0.05)
+                                    end
+                                end
+                            end
                         end
                     end
-                end
-            end
-        end
-        
-        for _, rec in ipairs(campfires) do
-            local d = rec.deployable
-            local board = d:FindFirstChild("Board")
-            local bb = board and board:FindFirstChild("Billboard")
-            local back = bb and bb:FindFirstChild("Backdrop")
-            local tl = back and back:FindFirstChild("TextLabel")
-            local secondsLeft = tonumber(tl and tl.Text) or 999
-
-            if secondsLeft <= 10 then
-                local coalQty = getQuantity("Coal")
-                if coalQty > 0 then
-                    Packets.InteractStructure.send({
-                        entityID = d:GetAttribute("EntityID"),
-                        itemID = ItemIDS.Coal
-                    })
-                    task.wait(0.05)
                 end
             end
         end
