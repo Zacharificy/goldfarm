@@ -220,6 +220,11 @@ local function tweenPath()
     
     local idx = nearestIndex(Root.Position)
     
+    -- Disable character physics for smooth tweening
+    if Humanoid then
+        Humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+    end
+    
     while state.tween do
         if not Root or not Root.Parent then
             task.wait(1)
@@ -233,13 +238,17 @@ local function tweenPath()
         end
         
         local target = Vector3.new(pos.X, pos.Y, pos.Z)
-        local startPos = Root.Position
-        local dist = (startPos - target).Magnitude
-        local duration = math.max(dist / settings.tweenSpeed, 1.2)
+        local dist = (Root.Position - target).Magnitude
+        local speed = 18
+        local duration = dist / speed
         
         if connections.tween then
             connections.tween:Cancel()
         end
+        
+        -- Use bodyvelocity approach for constant speed
+        Root.Anchored = false
+        Root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         
         local info = TweenInfo.new(duration, Enum.EasingStyle.Linear)
         connections.tween = TweenService:Create(Root, info, {CFrame = CFrame.new(target)})
@@ -263,6 +272,11 @@ local function tweenPath()
         
         idx = idx % #settings.positions + 1
         task.wait(0.01)
+    end
+    
+    -- Restore normal humanoid state
+    if Humanoid then
+        Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
     end
 end
 
