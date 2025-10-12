@@ -45,8 +45,11 @@ local settings = {
 
 local connections = {}
 local tasks = {}
-local lastEat = 0
-local HUNGER_CAP, EAT_THRESHOLD = 100, 90
+local HUNGER_CAP = 100
+local EAT_AT_OR_BELOW = 90
+local LOOP_WAIT_SECONDS = 1
+local POST_EAT_COOLDOWN = 2.0
+local lastEatTime = 0
 
 local fruitOptions = {}
 for name, data in pairs(ItemData) do
@@ -113,21 +116,45 @@ local function getHunger()
     return stats and stats.food
 end
 
+local function canEatNow()
+    return (tick() - lastEatTime) >= POST_EAT_COOLDOWN
+end
+
+local function eatFruitOnce(idx)
+    Packets.UseBagItem.send(idx)
+    lastEatTime = tick()
+end
+
+local function willOvereat(currentHunger, restore)
+    if not restore then return false end
+    return (currentHunger + restore) > HUNGER_CAP
+end
+
 local function autoEat()
     while state.autoEat do
         local hunger = getHunger()
-        if hunger and hunger <= EAT_THRESHOLD and (tick() - lastEat) >= 2 then
-            local idx = findFruit(settings.fruit)
-            if idx then
-                local restore = getRestore(settings.fruit)
-                if not restore or (hunger + restore) <= HUNGER_CAP then
-                    Packets.UseBagItem.send(idx)
-                    lastEat = tick()
-                    task.wait(0.1 + math.random() * 0.05)
+        
+        if not settings.fruit then
+            warn("No fruit selected for auto-eat.")
+        elseif not hunger then
+            warn("Hunger value unavailable right now.")
+        else
+            if hunger <= EAT_AT_OR_BELOW and canEatNow() then
+                local idx = findFruit(settings.fruit)
+                if idx then
+                    local restore = getRestore(settings.fruit)
+                    
+                    if restore and willOvereat(hunger, restore) then
+                    else
+                        eatFruitOnce(idx)
+                    end
+                else
+                    warn("Selected fruit not found in inventory: " .. tostring(settings.fruit))
                 end
             end
         end
-        task.wait(1)
+        
+        task.wait(LOOP_WAIT_SECONDS)
     end
 end
 
@@ -141,21 +168,21 @@ local function pickup(itemName)
                 if item.Name == itemName then
                     local id = item:GetAttribute("EntityID")
                     local t = os.clock()
-                    while not id and item.Parent == items and os.clock() - t < 2 do
+                    while not id and item.Parent == items and os.clock() - t < 3 do
                         task.wait()
                         id = item:GetAttribute("EntityID")
                     end
                     if id then
-                        for i = 1, 6 do
+                        for i = 1, 8 do
                             if not item or item.Parent ~= items then break end
                             Packets.Pickup.send(id)
-                            task.wait(0.04 + math.random() * 0.02)
+                            task.wait(0.12)
                         end
                     end
                 end
             end
         end
-        task.wait(0.08 + math.random() * 0.04)
+        task.wait(0.25)
     end
 end
 
@@ -190,17 +217,9 @@ local function tweenPath()
         local info = TweenInfo.new(duration, Enum.EasingStyle.Linear)
         connections.tween = TweenService:Create(Root, info, {CFrame = CFrame.new(target)})
         connections.tween:Play()
+        connections.tween.Completed:Wait()
         
-        local completed = false
-        connections.tween.Completed:Connect(function()
-            completed = true
-        end)
-        
-        while not completed and state.tween do
-            task.wait()
-        end
-        
-        task.wait(settings.waitTime + math.random() * 0.02)
+        task.wait(settings.waitTime)
         
         idx = idx % #settings.positions + 1
     end
