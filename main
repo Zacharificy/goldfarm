@@ -220,11 +220,6 @@ local function tweenPath()
     
     local idx = nearestIndex(Root.Position)
     
-    -- Disable swimming/climbing states
-    if Humanoid then
-        Humanoid:ChangeState(Enum.HumanoidStateType.Physics)
-    end
-    
     while state.tween do
         if not Root or not Root.Parent then
             task.wait(1)
@@ -246,7 +241,6 @@ local function tweenPath()
             connections.tween:Cancel()
         end
         
-        -- Anchor to prevent physics interference
         Root.Anchored = true
         Root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         
@@ -254,6 +248,9 @@ local function tweenPath()
         connections.tween = TweenService:Create(Root, info, {CFrame = CFrame.new(target)})
         
         local completed = false
+        local rubberbanded = false
+        local startPos = Root.Position
+        local lastPos = startPos
         
         local conn
         conn = connections.tween.Completed:Connect(function()
@@ -263,22 +260,49 @@ local function tweenPath()
         
         connections.tween:Play()
         
+        -- Detect rubberband by checking for sudden position changes
         while state.tween and not completed do
             task.wait(0.1)
+            
+            if not Root or not Root.Parent then break end
+            
+            local curPos = Root.Position
+            local moveDist = (curPos - lastPos).Magnitude
+            
+            -- If we suddenly moved back more than 10 studs, we rubberbanded
+            if moveDist > 10 then
+                local dirToTarget = (target - lastPos).Unit
+                local dirMoved = (curPos - lastPos).Unit
+                local dotProduct = dirToTarget:Dot(dirMoved)
+                
+                -- If we moved opposite to target direction, it's a rubberband
+                if dotProduct < 0 then
+                    rubberbanded = true
+                    warn("Rubberband detected! Recalculating path...")
+                    break
+                end
+            end
+            
+            lastPos = curPos
         end
         
         if conn then conn:Disconnect() end
         if connections.tween then connections.tween:Cancel() end
         
+        -- If rubberbanded, find nearest position and continue smoothly
+        if rubberbanded then
+            Root.Anchored = false
+            task.wait(0.5)
+            idx = nearestIndex(Root.Position)
+            task.wait(0.3)
+            continue
+        end
+        
         idx = idx % #settings.positions + 1
         task.wait(0.01)
     end
     
-    -- Restore normal state and unanchor
     Root.Anchored = false
-    if Humanoid then
-        Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-    end
 end
 
 local gui = Instance.new("ScreenGui")
