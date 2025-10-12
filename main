@@ -19,7 +19,7 @@ local success, config = pcall(function()
     return loadstring(game:HttpGet("https://raw.githubusercontent.com/Zacharificy/goldfarm/main/tweens"))()
 end)
 
-local DEFAULT_CONFIG = success and config or {waitTime = 1, heightOffset = 0, moveSpeed = 20, positions = {}}
+local DEFAULT_CONFIG = success and config or {waitTime = 0, heightOffset = 0, moveSpeed = 20, positions = {}}
 if success then
     print("✅ Tween config loaded! (" .. #config.positions .. " positions)")
 else
@@ -39,7 +39,7 @@ local settings = {
     hitRadius = 100,
     fruit = "Lemon",
     tweenSpeed = 18.6,
-    waitTime = DEFAULT_CONFIG.waitTime or 0.1,
+    waitTime = DEFAULT_CONFIG.waitTime or 0,
     positions = DEFAULT_CONFIG.positions or {}
 }
 
@@ -743,7 +743,7 @@ toggle("Position Tween", "🧭", function(on)
     end
 end)
 
-slider("Wait Time (seconds)", 0, 10, settings.waitTime, function(v)
+slider("Wait Time (seconds)", 0, 10, 0, function(v)
     settings.waitTime = v
 end)
 
