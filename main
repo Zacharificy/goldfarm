@@ -44,9 +44,9 @@ local state = {
 }
 
 local settings = {
-    hitRadius = 100,
+    hitRadius = 200,
     fruit = "Lemon",
-    tweenSpeed = 18.6,
+    tweenSpeed = 19,
     waitTime = DEFAULT_CONFIG.waitTime or 0.1,
     positions = DEFAULT_CONFIG.positions or {},
     currentTab = "main"
@@ -102,24 +102,32 @@ LocalPlayer.CharacterAdded:Connect(function(char)
     Root = char:WaitForChild("HumanoidRootPart")
 end)
 
--- Hit resources
+-- Hit resources (OPTIMIZED)
 local hitDebounce = false
+local lastHitTime = 0
 local function hitResources()
     if not state.autoHit or hitDebounce then return end
+    local now = tick()
+    if now - lastHitTime < 0.08 then return end
+    
     hitDebounce = true
+    lastHitTime = now
     
     local entities = {}
-    for _, res in ipairs(Workspace.Resources:GetChildren()) do
-        if (Root.Position - res:GetPivot().Position).Magnitude <= settings.hitRadius then
-            local id = res:GetAttribute("EntityID")
-            if id then table.insert(entities, id) end
+    local resourcesFolder = Workspace:FindFirstChild("Resources")
+    if resourcesFolder then
+        for _, res in ipairs(resourcesFolder:GetChildren()) do
+            if (Root.Position - res:GetPivot().Position).Magnitude <= settings.hitRadius then
+                local id = res:GetAttribute("EntityID")
+                if id then table.insert(entities, id) end
+            end
+        end
+        if #entities > 0 then
+            Packets.SwingTool.send(entities)
         end
     end
-    if #entities > 0 then
-        Packets.SwingTool.send(entities)
-    end
     
-    task.delay(0.1, function() hitDebounce = false end)
+    task.delay(0.08, function() hitDebounce = false end)
 end
 
 -- Noclip
@@ -205,35 +213,38 @@ local function autoEat()
     end
 end
 
--- Pickup items
+-- Pickup items (OPTIMIZED - won't interfere with TP system)
 local pickupDebounce = {}
 local function pickup(itemName)
-    local enabled = itemName == "Raw Gold" and state.pickupGold or state.pickupCoal
-    while enabled do
-        enabled = itemName == "Raw Gold" and state.pickupGold or state.pickupCoal
+    while (itemName == "Raw Gold" and state.pickupGold) or (itemName == "Coal" and state.pickupCoal) do
         local items = Workspace:FindFirstChild("Items")
         if items then
             for _, item in ipairs(items:GetChildren()) do
+                -- Skip Raw Gold if TP system is active (let TP handle it)
                 if item.Name == itemName and not pickupDebounce[item] then
+                    if itemName == "Raw Gold" and state.tpRawGoldToChest then
+                        continue
+                    end
+                    
                     pickupDebounce[item] = true
                     local id = item:GetAttribute("EntityID")
                     local t = os.clock()
-                    while not id and item.Parent == items and os.clock() - t < 1.5 do
-                        task.wait()
+                    while not id and item.Parent == items and os.clock() - t < 1 do
+                        task.wait(0.03)
                         id = item:GetAttribute("EntityID")
                     end
                     if id then
-                        for i = 1, 12 do
+                        for i = 1, 10 do
                             if not item or item.Parent ~= items then break end
                             Packets.Pickup.send(id)
-                            task.wait(0.03)
+                            task.wait(0.025)
                         end
                     end
-                    task.delay(1, function() pickupDebounce[item] = nil end)
+                    task.delay(0.8, function() pickupDebounce[item] = nil end)
                 end
             end
         end
-        task.wait(0.05)
+        task.wait(0.04)
     end
 end
 
@@ -299,7 +310,7 @@ local function pressCoins()
     end
 end
 
--- Improved Campfire refuel (from immortal.tech)
+-- Campfire refuel - Uses Coal instead of Logs
 local function campfireRefuelLoop()
     while state.campfireFuel do
         local deployablesFolder = Workspace:FindFirstChild("Deployables")
@@ -321,18 +332,18 @@ local function campfireRefuelLoop()
                             local amount = 0
                             local tempFire = fireValue
                             
-                            -- Calculate how many logs needed
+                            -- Calculate how many coals needed (Coal gives 50 fuel each)
                             for i = 1, 10 do
                                 if tempFire >= 250 then break end
                                 tempFire = tempFire + 50
                                 amount = amount + 1
                             end
                             
-                            -- Add the logs
+                            -- Add the coal
                             for i = 1, amount do
                                 Packets.InteractStructure.send({
                                     entityID = structure:GetAttribute("EntityID"),
-                                    itemID = ItemIDS.Log
+                                    itemID = ItemIDS.Coal
                                 })
                                 task.wait(0.05)
                             end
@@ -345,11 +356,14 @@ local function campfireRefuelLoop()
     end
 end
 
--- Improved TP Raw Gold to Chest (from immortal.tech)
+-- TP Raw Gold to Chest - Fully automatic with drop (ULTRA FAST & OPTIMIZED)
+local tpRawGoldRunning = false
+local lastDropTime = 0
 local function tpRawGoldLoop()
-    while state.tpRawGoldToChest do
-        task.wait(0.1)
-        
+    tpRawGoldRunning = true
+    local tpDebounce = {}
+    
+    while state.tpRawGoldToChest and tpRawGoldRunning do
         if not chest or not chest.Parent then
             chest = getDeployable("Chest", 100)
             if not chest then
@@ -359,49 +373,66 @@ local function tpRawGoldLoop()
             end
         end
         
+        -- TP any existing dropped Raw Gold IMMEDIATELY (but only ones we dropped)
         local items = Workspace:FindFirstChild("Items")
         if items then
             for _, item in ipairs(items:GetChildren()) do
-                if item.Name == "Raw Gold" and item.Parent == items then
-                    local id = item:GetAttribute("EntityID")
-                    
-                    -- Wait a bit for EntityID if not available
-                    if not id then
-                        local t0 = os.clock()
-                        while not id and item.Parent == items and os.clock() - t0 < 1 do
-                            task.wait(0.1)
-                            id = item:GetAttribute("EntityID")
-                        end
-                    end
-                    
-                    if id then
-                        -- Use ForceInteract to gain network ownership
-                        Packets.ForceInteract.send(id)
-                        task.wait(0.05)
+                if item.Name == "Raw Gold" and item.Parent == items and not tpDebounce[item] then
+                    -- Check if this was recently dropped by us
+                    local itemAge = tick() - (item:GetAttribute("SpawnTime") or 0)
+                    if itemAge < 2 or tick() - lastDropTime < 2 then
+                        tpDebounce[item] = true
+                        local id = item:GetAttribute("EntityID")
                         
-                        -- Teleport directly to chest
-                        local success = pcall(function()
-                            if item and item.Parent == items and chest and chest.Parent then
-                                item:PivotTo(chest:GetPivot() * CFrame.new(0, 2, 0))
+                        -- Quick wait for EntityID
+                        if not id then
+                            local t0 = os.clock()
+                            while not id and item.Parent == items and os.clock() - t0 < 0.15 do
+                                task.wait(0.01)
+                                id = item:GetAttribute("EntityID")
                             end
-                        end)
-                        
-                        task.wait(0.05)
-                        
-                        -- Release network ownership
-                        Packets.ForceInteract.send()
-                        
-                        if not success then
-                            warn("failed to teleport raw gold")
                         end
+                        
+                        if id then
+                            Packets.ForceInteract.send(id)
+                            task.wait(0.01)
+                            
+                            pcall(function()
+                                if item and item.Parent == items and chest and chest.Parent then
+                                    item:PivotTo(chest:GetPivot() * CFrame.new(0, 2, 0))
+                                end
+                            end)
+                            
+                            task.wait(0.01)
+                            Packets.ForceInteract.send()
+                        end
+                        
+                        task.delay(0.5, function() tpDebounce[item] = nil end)
                     end
                 end
             end
         end
+        
+        -- Drop 3 Raw Gold at once for speed
+        local inventory = GameUtil.getData().inventory
+        for idx, data in pairs(inventory) do
+            if data.name == "Raw Gold" and data.quantity > 0 then
+                local dropAmount = math.min(3, data.quantity)
+                for i = 1, dropAmount do
+                    Packets.DropBagItem.send(idx, 1)
+                    task.wait(0.008)
+                end
+                lastDropTime = tick()
+                break
+            end
+        end
+        
+        task.wait(0.04)
     end
+    tpRawGoldRunning = false
 end
 
--- NEW: Pickup gold from chest
+-- Pickup gold from chest (ONLY processed Gold, not Raw Gold)
 local function pickupGoldFromChestLoop()
     while state.pickupGoldFromChest do
         if not chest or not chest.Parent then
@@ -416,7 +447,7 @@ local function pickupGoldFromChestLoop()
         local contents = chest:FindFirstChild("Contents")
         if contents then
             for _, item in ipairs(contents:GetChildren()) do
-                if item.Name == "Gold" or item.Name == "Raw Gold" then
+                if item.Name == "Gold" then  -- ONLY pick up "Gold", NOT "Raw Gold"
                     local id = item:GetAttribute("EntityID")
                     if id then
                         for i = 1, 8 do
@@ -429,6 +460,35 @@ local function pickupGoldFromChestLoop()
             end
         end
         task.wait(0.25)
+    end
+end
+
+-- Pickup coins from press
+local function pickupCoinsLoop()
+    while state.pickupCoins do
+        local items = Workspace:FindFirstChild("Items")
+        if items then
+            for _, item in ipairs(items:GetChildren()) do
+                if item.Name == "Coin" and not pickupDebounce[item] then
+                    pickupDebounce[item] = true
+                    local id = item:GetAttribute("EntityID")
+                    local t = os.clock()
+                    while not id and item.Parent == items and os.clock() - t < 1.5 do
+                        task.wait()
+                        id = item:GetAttribute("EntityID")
+                    end
+                    if id then
+                        for i = 1, 12 do
+                            if not item or item.Parent ~= items then break end
+                            Packets.Pickup.send(id)
+                            task.wait(0.03)
+                        end
+                    end
+                    task.delay(1, function() pickupDebounce[item] = nil end)
+                end
+            end
+        end
+        task.wait(0.05)
     end
 end
 
@@ -536,9 +596,7 @@ local function tweenPath()
     Root.Anchored = false
 end
 
--- All function definitions must be complete before creating UI
-
--- GUI Creation (optimized and more appealing)
+-- GUI Creation
 local gui = Instance.new("ScreenGui")
 gui.Name = "TweenHub"
 gui.ResetOnSpawn = false
@@ -620,7 +678,16 @@ close.MouseLeave:Connect(function()
 end)
 
 close.MouseButton1Click:Connect(function()
-    gui:Destroy()
+    gui.Enabled = false
+end)
+
+-- Toggle GUI visibility with Left Control
+UIS.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.KeyCode == Enum.KeyCode.LeftControl then
+        gui.Enabled = not gui.Enabled
+    end
 end)
 
 -- Tab system
@@ -781,6 +848,8 @@ local function toggle(name, icon, callback, parent)
         
         callback(on)
     end)
+    
+    return {frame = frame, button = btn, state = on}
 end
 
 local function slider(name, min, max, def, callback, parent)
@@ -981,10 +1050,6 @@ toggle("auto hit resources", "🔨", function(on)
     end
 end)
 
-slider("hit radius", 10, 200, settings.hitRadius, function(v)
-    settings.hitRadius = v
-end)
-
 toggle("noclip (doors & boards)", "👻", function(on)
     state.noclip = on
     noclip()
@@ -1083,10 +1148,14 @@ toggle("tp raw gold to chest", "📦", function(on)
             return
         end
         print("✅ tp raw gold enabled - chest found!")
-        -- Start the loop directly
-        task.spawn(function()
-            tpRawGoldLoop()
-        end)
+        tasks.tpRawGold = task.spawn(tpRawGoldLoop)
+    else
+        tpRawGoldRunning = false
+        if tasks.tpRawGold then
+            task.cancel(tasks.tpRawGold)
+            tasks.tpRawGold = nil
+        end
+        print("❌ tp raw gold disabled")
     end
 end, extraContent)
 
@@ -1134,7 +1203,7 @@ local iLabel = Instance.new("TextLabel")
 iLabel.Size = UDim2.new(1, -24, 1, -20)
 iLabel.Position = UDim2.new(0, 12, 0, 10)
 iLabel.BackgroundTransparency = 1
-iLabel.Text = "ℹ️ Loaded " .. #settings.positions .. " positions\n✨ Enjoy using Tween Hub!"
+iLabel.Text = "ℹ️ Loaded " .. #settings.positions .. " positions\n✨ Press Left Control to toggle GUI"
 iLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
 iLabel.TextSize = 13
 iLabel.Font = Enum.Font.GothamSemibold
