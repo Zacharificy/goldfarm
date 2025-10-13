@@ -492,6 +492,9 @@ local function tweenPath()
     local REACH_RADIUS = 4
     local MIN_IMPROVE_STUDS = 0.75
     local NO_PROGRESS_SECS = 2.5
+    local RUBBERBAND_CHECK_INTERVAL = 0.3
+    local RUBBERBAND_THRESHOLD = 15
+    local lastValidIndex = curIndex
 
     while state.tween do
         if not Root or not Root.Parent or not Humanoid or not Humanoid.Parent then
@@ -528,6 +531,9 @@ local function tweenPath()
         local t0 = tick()
         local lastPoll = t0
         local lastDist = (Root.Position - targetPos).Magnitude
+        local lastRubberbandCheck = t0
+        local lastRubberbandPos = Root.Position
+        local rubberbandDetected = false
 
         connections.tweenConn = connections.tween.Completed:Connect(function()
             completed = true
@@ -542,17 +548,33 @@ local function tweenPath()
         while state.tween and not completed do
             task.wait(0.2)
             
+            local now = tick()
             local curDist = (Root.Position - targetPos).Magnitude
+            
             if curDist <= REACH_RADIUS then
                 completed = true
+                lastValidIndex = curIndex
                 break
             end
 
-            if (tick() - lastPoll) > NO_PROGRESS_SECS and (lastDist - curDist) < MIN_IMPROVE_STUDS then
+            if (now - lastRubberbandCheck) >= RUBBERBAND_CHECK_INTERVAL then
+                local movedDist = (Root.Position - lastRubberbandPos).Magnitude
+                if movedDist > RUBBERBAND_THRESHOLD then
+                    warn("⚠️ rubberband detected! returning to previous waypoint")
+                    rubberbandDetected = true
+                    break
+                end
+                lastRubberbandCheck = now
+                lastRubberbandPos = Root.Position
+            end
+
+            if (now - lastPoll) > NO_PROGRESS_SECS and (lastDist - curDist) < MIN_IMPROVE_STUDS then
+                warn("⚠️ stuck detected! returning to previous waypoint")
+                rubberbandDetected = true
                 break
             end
 
-            lastPoll = tick()
+            lastPoll = now
             lastDist = curDist
         end
 
@@ -565,7 +587,19 @@ local function tweenPath()
             connections.tween = nil
         end
 
-        curIndex = (curIndex % #settings.positions) + 1
+        if rubberbandDetected then
+            curIndex = lastValidIndex
+            warn("↩️ teleporting back to waypoint #" .. curIndex)
+            local prevPos = settings.positions[curIndex]
+            if prevPos and prevPos.X and prevPos.Y and prevPos.Z then
+                Root.CFrame = CFrame.new(Vector3.new(prevPos.X, prevPos.Y, prevPos.Z))
+                task.wait(0.5)
+            end
+        else
+            curIndex = (curIndex % #settings.positions) + 1
+            lastValidIndex = curIndex
+        end
+        
         task.wait(settings.waitTime)
     end
 
