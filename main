@@ -22,6 +22,21 @@ local Character = Player.Character or Player.CharacterAdded:Wait()
 local Humanoid = Character:WaitForChild("Humanoid")
 local Root = Character:WaitForChild("HumanoidRootPart")
 
+-- Anti-Rubberband Hook (from second script)
+setthreadidentity(5)
+local ClientAnimalReady = RS:WaitForChild("ClientAnimalReady")
+local old; old = hookfunction(ClientAnimalReady.FireServer, function(...)
+    local remote = select(1, ...) 
+    if not checkcaller() and remote == ClientAnimalReady then
+        warn("Blocked ClientAnimalReady - Anti-Rubberband")
+        return nil
+    end
+    return old(...)
+end)
+
+-- Disable Swimming (keeps character on ground)
+Humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, false)
+
 -- Game Modules (cached)
 local Packets = require(RS.Modules.Packets)
 local GameUtil = require(RS.Modules.GameUtil)
@@ -32,6 +47,8 @@ Player.CharacterAdded:Connect(function(char)
     Character = char
     Humanoid = char:WaitForChild("Humanoid")
     Root = char:WaitForChild("HumanoidRootPart")
+    -- Reapply swimming disable on respawn
+    Humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, false)
 end)
 
 -- Load config (Async)
@@ -438,8 +455,15 @@ local function disableBlackScreen()
     end
 end
 
--- Tween System with Config Support
+-- Enhanced Tween System with Anti-Rubberband & Strict Movement
 local activeTween = nil
+local REACH_RADIUS = 4
+local RUBBER_DEV_STUDS = 6
+local TELEPORT_BACK_DINC = 8
+local TELEPORT_STEP_JUMP = 15
+local NO_PROGRESS_SECS = 2.5
+local SETTLE_SECS = 0.40
+local JUMP_SAMPLE_SECS = 0.20
 
 local function tweenToPosition(targetPos)
     if not Root or not Root.Parent then return end
@@ -454,7 +478,8 @@ local function tweenToPosition(targetPos)
         return
     end
     
-    local distance = (targetVector3 - Root.Position).Magnitude
+    local startPos = Root.Position
+    local distance = (targetVector3 - startPos).Magnitude
     local duration = distance / S.tweenSpeed
     
     if activeTween then
@@ -468,7 +493,69 @@ local function tweenToPosition(targetPos)
     )
     
     activeTween = TweenService:Create(Root, tweenInfo, {CFrame = CFrame.new(targetVector3)})
+    
+    local completed = false
+    local rubberbanded = false
+    local t0 = tick()
+    local lastPoll = t0
+    local lastPos = startPos
+    local lastDist = distance
+    
+    local conn; conn = activeTween.Completed:Connect(function()
+        completed = true
+        if conn then conn:Disconnect() end
+    end)
+    
     activeTween:Play()
+    
+    -- Monitor for rubberband during tween
+    task.spawn(function()
+        while not completed and activeTween and activeTween.PlaybackState == Enum.PlaybackState.Playing do
+            task.wait(JUMP_SAMPLE_SECS)
+            
+            local now = tick()
+            local elapsed = now - t0
+            local alpha = math.clamp(elapsed / duration, 0, 1)
+            
+            local curPos = Root.Position
+            local curDist = (curPos - targetVector3).Magnitude
+            
+            -- Check if reached
+            if curDist <= REACH_RADIUS then
+                completed = true
+                break
+            end
+            
+            -- Detect teleport back or big jump
+            local stepJump = (curPos - lastPos).Magnitude
+            if (curDist - lastDist) >= TELEPORT_BACK_DINC or stepJump >= TELEPORT_STEP_JUMP then
+                rubberbanded = true
+                break
+            end
+            
+            -- Check deviation from expected path
+            local expectPos = startPos:Lerp(targetVector3, alpha)
+            local dev = (curPos - expectPos).Magnitude
+            if dev >= RUBBER_DEV_STUDS then
+                local vmag = Root.AssemblyLinearVelocity.Magnitude
+                if vmag < 1 or dev > (RUBBER_DEV_STUDS * 1.5) then
+                    rubberbanded = true
+                    break
+                end
+            end
+            
+            lastPoll = now
+            lastDist = curDist
+            lastPos = curPos
+        end
+        
+        if rubberbanded then
+            if activeTween then activeTween:Cancel() end
+            Root.Anchored = false
+            task.wait(SETTLE_SECS)
+        end
+    end)
+    
     activeTween.Completed:Wait()
 end
 
@@ -494,7 +581,7 @@ repeat task.wait(0.1) until Library
 
 -- GUI Setup
 local Window = Library:CreateWindow({
-    Title = 'Gold Farm Hub',
+    Title = 'Gold Farm Hub - Enhanced',
     Center = true,
     AutoShow = true,
     TabPadding = 8,
@@ -563,7 +650,7 @@ MainBox:AddToggle('AutoEat', {
 })
 
 -- Tween Tab
-local TweenBox = Tabs.Main:AddRightGroupbox('Tweening')
+local TweenBox = Tabs.Main:AddRightGroupbox('Tweening (Anti-Rubberband)')
 
 TweenBox:AddToggle('Tween', {
     Text = 'Enable Tween',
@@ -608,6 +695,8 @@ TweenBox:AddSlider('WaitTime', {
     end
 })
 
+TweenBox:AddLabel('Anti-Rubberband: ENABLED')
+TweenBox:AddLabel('Strict Movement: ENABLED')
 TweenBox:AddLabel('Positions: Loading...')
 
 task.spawn(function()
@@ -618,7 +707,7 @@ task.spawn(function()
     end
 end)
 
--- Pickup Section (Now on Main Tab)
+-- Pickup Section
 local PickupBox = Tabs.Main:AddLeftGroupbox('Instant Pickup')
 
 PickupBox:AddToggle('PickupGold', {
@@ -655,7 +744,7 @@ PickupBox:AddToggle('PickupCoins', {
 local ExtrasBox = Tabs.Extras:AddLeftGroupbox('Extras')
 
 ExtrasBox:AddToggle('CoinPress', {
-    Text = 'Auto Coin Press (Ultra Fast)',
+    Text = 'Auto Coin Press',
     Default = false,
     Callback = function(v)
         S.coinPress = v
@@ -675,7 +764,7 @@ ExtrasBox:AddToggle('CampfireFuel', {
 })
 
 ExtrasBox:AddToggle('TPGoldToChest', {
-    Text = 'TP Gold to Chest (Ultra Fast)',
+    Text = 'TP Gold to Chest',
     Default = false,
     Callback = function(v)
         S.tpRawGoldToChest = v
@@ -720,49 +809,24 @@ PerfBox:AddLabel('Black Screen Mode')
 PerfBox:AddToggle('BlackScreen', {
     Text = 'Enable Black Screen',
     Default = false,
-    Tooltip = 'Covers screen with black overlay and disables lighting for maximum FPS',
+    Tooltip = 'Covers screen with black overlay',
     Callback = function(v)
         S.blackScreen = v
         if v then
             enableBlackScreen()
-            Library:Notify('Black Screen Optimization Enabled! FPS Boost Active')
+            Library:Notify('Black Screen Enabled!')
         else
             disableBlackScreen()
-            Library:Notify('Black Screen Optimization Disabled')
+            Library:Notify('Black Screen Disabled')
         end
     end
 })
 
 PerfBox:AddDivider()
-
 PerfBox:AddLabel('Benefits:')
 PerfBox:AddLabel('• Massive FPS increase')
 PerfBox:AddLabel('• Reduced GPU usage')
 PerfBox:AddLabel('• Lower CPU overhead')
-PerfBox:AddLabel('• Disabled lighting effects')
-
-local PerfBox2 = Tabs.Performance:AddRightGroupbox('Graphics Settings')
-
-PerfBox2:AddButton('Set Graphics to Minimum', function()
-    settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-    Library:Notify('Graphics set to minimum!')
-end)
-
-PerfBox2:AddButton('Disable All Effects', function()
-    for _, effect in pairs(Lighting:GetChildren()) do
-        if effect:IsA("PostEffect") then
-            effect.Enabled = false
-        end
-    end
-    Library:Notify('All visual effects disabled!')
-end)
-
-PerfBox2:AddDivider()
-
-PerfBox2:AddLabel('Additional Optimizations:')
-PerfBox2:AddLabel('• Lower graphics quality')
-PerfBox2:AddLabel('• Disable post-processing')
-PerfBox2:AddLabel('• Reduce particle effects')
 
 -- UI Settings
 ThemeManager:SetLibrary(Library)
@@ -783,8 +847,11 @@ Library:OnUnload(function()
     end
 end)
 
-Library:Notify('Gold Farm Hub loaded!')
-print("=== Gold Farm Loaded ===\nPositions: Loading...\nFruit: " .. S.fruit .. "\nTween Speed: " .. S.tweenSpeed .. "\nWait Time: " .. S.waitTime)
+Library:Notify('Gold Farm Hub - Enhanced loaded!')
+print("=== Gold Farm Loaded ===")
+print("Anti-Rubberband: ACTIVE")
+print("Strict Movement: ACTIVE")
+print("Swimming: DISABLED")
 
 task.spawn(function()
     task.wait(2)
