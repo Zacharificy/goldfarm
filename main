@@ -1,153 +1,163 @@
-local TweenService = game:GetService("TweenService")
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
-local RS = game:GetService("ReplicatedStorage")
-local UIS = game:GetService("UserInputService")
+-- Load UI Library (Async)
+local repo = 'https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/'
+local Library, ThemeManager, SaveManager
 
-local LocalPlayer = Players.LocalPlayer
-local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+task.spawn(function()
+    Library = loadstring(game:HttpGet(repo .. 'Library.lua'))()
+    ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
+    SaveManager = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
+end)
+
+-- Services (Cached)
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
+
+-- Player
+local Player = Players.LocalPlayer
+local Character = Player.Character or Player.CharacterAdded:Wait()
 local Humanoid = Character:WaitForChild("Humanoid")
 local Root = Character:WaitForChild("HumanoidRootPart")
 
+-- Game Modules (cached)
 local Packets = require(RS.Modules.Packets)
 local GameUtil = require(RS.Modules.GameUtil)
 local ItemIDS = require(RS.Modules.ItemIDS)
 local ItemData = require(RS.Modules.ItemData)
 
-local success, config = pcall(function()
-    return loadstring(game:HttpGet("https://raw.githubusercontent.com/Zacharificy/goldfarm/main/tweens"))()
+Player.CharacterAdded:Connect(function(char)
+    Character = char
+    Humanoid = char:WaitForChild("Humanoid")
+    Root = char:WaitForChild("HumanoidRootPart")
 end)
 
-local DEFAULT_CONFIG = success and config or {waitTime = 0, heightOffset = 0, moveSpeed = 20, positions = {}}
-if success then
-    print("✅ config loaded! (" .. #config.positions .. " positions)")
-else
-    warn("❌ config load failed")
-end
+-- Load config (Async)
+local config = {waitTime = 0.01, positions = {}}
+task.spawn(function()
+    local success, result = pcall(function()
+        return loadstring(game:HttpGet("https://raw.githubusercontent.com/Zacharificy/goldfarm/main/tweens"))()
+    end)
+    if success and result then
+        config = result
+    end
+end)
 
-local state = {
+-- State
+local S = {
     autoHit = false,
     noclip = false,
     autoEat = false,
     tween = false,
     pickupGold = false,
     pickupCoal = false,
+    pickupCoins = false,
     antiAFK = false,
     coinPress = false,
     campfireFuel = false,
     tpRawGoldToChest = false,
     pickupGoldFromChest = false,
-    pickupCoins = false
-}
-
-local settings = {
-    hitRadius = 200,
+    blackScreen = false,
     fruit = "Lemon",
-    tweenSpeed = 19,
-    waitTime = 0,
-    positions = DEFAULT_CONFIG.positions or {},
-    currentTab = "main"
+    hitRadius = 200,
+    waitTime = 0.01,
+    walkSpeed = 20,
+    positions = {},
+    tweenSpeed = 20,
+    currentTargetIndex = 1,
+    isMoving = false,
+    lastEatTime = 0,
+    chest = nil
 }
 
-local connections = {}
-local tasks = {}
-local chest = nil
+-- Constants
 local HUNGER_CAP = 100
 local EAT_AT_OR_BELOW = 90
-local LOOP_WAIT_SECONDS = 0.8
 local POST_EAT_COOLDOWN = 1.5
-local lastEatTime = 0
 
+-- Cached tables
+local Connections = {}
+local Tasks = {}
+local CachedItems = {
+    Items = Workspace:FindFirstChild("Items"),
+    Resources = Workspace:FindFirstChild("Resources"),
+    Deployables = Workspace:FindFirstChild("Deployables")
+}
+
+-- Fruit options (cached, built async)
+local fruitOptions = {}
+task.spawn(function()
+    for name, data in pairs(ItemData) do
+        if data.grows then
+            table.insert(fruitOptions, name)
+        end
+    end
+    table.sort(fruitOptions)
+end)
+
+-- Optimized Anti-AFK
 local function setupAntiAFK()
     local GC = getconnections or get_signal_cons
     if GC then
-        for i,v in pairs(GC(Players.LocalPlayer.Idled)) do
-            if v["Disable"] then
-                v["Disable"](v)
-            elseif v["Disconnect"] then
-                v["Disconnect"](v)
-            end
+        for _, v in pairs(GC(Player.Idled)) do
+            if v.Disable then v:Disable() elseif v.Disconnect then v:Disconnect() end
         end
-        print("✅ anti-afk enabled")
     else
         local VirtualUser = game:GetService("VirtualUser")
-        Players.LocalPlayer.Idled:Connect(function()
+        Player.Idled:Connect(function()
             VirtualUser:CaptureController()
             VirtualUser:ClickButton2(Vector2.new())
         end)
-        print("✅ anti-afk enabled")
     end
 end
 
-local fruitOptions = {}
-for name, data in pairs(ItemData) do
-    if data.grows then
-        table.insert(fruitOptions, name)
-    end
-end
-table.sort(fruitOptions)
-if #fruitOptions == 0 then
-    fruitOptions = {"Bloodfruit", "Strawberry", "Berries", "Cloudberry", "Prickly Pear", "Lemon"}
-end
-
-LocalPlayer.CharacterAdded:Connect(function(char)
-    Character = char
-    Humanoid = char:WaitForChild("Humanoid")
-    Root = char:WaitForChild("HumanoidRootPart")
-end)
-
+-- Optimized Auto Hit
 local hitDebounce = false
-local lastHitTime = 0
 local function hitResources()
-    if not state.autoHit or hitDebounce then return end
-    local now = tick()
-    if now - lastHitTime < 0.06 then return end
-    
+    if hitDebounce or not Root.Parent then return end
     hitDebounce = true
-    lastHitTime = now
     
     local entities = {}
-    local resourcesFolder = Workspace:FindFirstChild("Resources")
-    if resourcesFolder then
-        for _, res in ipairs(resourcesFolder:GetChildren()) do
-            if (Root.Position - res:GetPivot().Position).Magnitude <= settings.hitRadius then
-                local id = res:GetAttribute("EntityID")
-                if id then table.insert(entities, id) end
-            end
-        end
-        if #entities > 0 then
-            Packets.SwingTool.send(entities)
-        end
-    end
+    local rootPos = Root.Position
+    local hitRadiusSq = S.hitRadius * S.hitRadius
     
-    task.delay(0.06, function() hitDebounce = false end)
-end
-
-local function noclip()
-    local deployables = Workspace:FindFirstChild("Deployables")
-    if deployables then
-        for _, v in ipairs(deployables:GetChildren()) do
-            local door = v:FindFirstChild("Door")
-            if door then
-                door.Transparency = state.noclip and 0.5 or 0
-                door.CanCollide = not state.noclip
-            end
-        end
-    end
-    
-    if state.noclip and not state.tween then
-        local resources = Workspace:FindFirstChild("Resources")
-        if resources then
-            for _, v in ipairs(resources:GetChildren()) do
-                if v.Name == "Old Boards" then
-                    v:Destroy()
+    if CachedItems.Resources then
+        for _, res in ipairs(CachedItems.Resources:GetChildren()) do
+            if res.Parent then
+                local ok, pivot = pcall(res.GetPivot, res)
+                if ok then
+                    local distSq = (rootPos - pivot.Position).Magnitude
+                    if distSq * distSq <= hitRadiusSq then
+                        local id = res:GetAttribute("EntityID")
+                        if id then entities[#entities + 1] = id end
+                    end
                 end
             end
         end
     end
     
-    if state.noclip and Character then
+    if #entities > 0 then
+        pcall(Packets.SwingTool.send, entities)
+    end
+    
+    task.delay(0.06, function() hitDebounce = false end)
+end
+
+-- Optimized Noclip
+local function noclip()
+    if CachedItems.Deployables then
+        for _, v in ipairs(CachedItems.Deployables:GetChildren()) do
+            local door = v:FindFirstChild("Door")
+            if door then
+                door.Transparency = S.noclip and 0.5 or 0
+                door.CanCollide = not S.noclip
+            end
+        end
+    end
+    
+    if S.noclip and Character then
         for _, part in ipairs(Character:GetDescendants()) do
             if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
                 part.CanCollide = false
@@ -156,16 +166,11 @@ local function noclip()
     end
 end
 
+-- Optimized Auto Eat
 local function findFruit(name)
     for idx, data in next, GameUtil.getData().inventory do
         if data.name == name then return idx end
     end
-end
-
-local function getRestore(name)
-    local id = ItemIDS[name] or name
-    local data = ItemData[id] or (ItemIDS[id] and ItemData[ItemIDS[id]])
-    return data and (data.food or data.hunger or data.restore or data.restoreValue or data.heal)
 end
 
 local function getHunger()
@@ -173,86 +178,80 @@ local function getHunger()
     return stats and stats.food
 end
 
-local function canEatNow()
-    return (tick() - lastEatTime) >= POST_EAT_COOLDOWN
-end
-
-local function willOvereat(currentHunger, restore)
-    if not restore then return false end
-    return (currentHunger + restore) > HUNGER_CAP
-end
-
 local function autoEat()
-    while state.autoEat do
+    while S.autoEat do
         local hunger = getHunger()
-        local health = Character and Character:FindFirstChild("Humanoid") and Character.Humanoid.Health or 100
-        
-        if not settings.fruit then
-            warn("no fruit selected")
-        elseif not hunger then
-            warn("hunger unavailable")
-        else
-            if (hunger <= EAT_AT_OR_BELOW or health <= 90) and canEatNow() then
-                local idx = findFruit(settings.fruit)
-                if idx then
-                    local restore = getRestore(settings.fruit)
-                    if not (restore and willOvereat(hunger, restore) and health > 90) then
-                        Packets.UseBagItem.send(idx)
-                        lastEatTime = tick()
-                    end
-                end
+        if S.fruit and hunger and hunger <= EAT_AT_OR_BELOW and (tick() - S.lastEatTime) >= POST_EAT_COOLDOWN then
+            local idx = findFruit(S.fruit)
+            if idx then
+                Packets.UseBagItem.send(idx)
+                S.lastEatTime = tick()
             end
         end
-        
-        task.wait(LOOP_WAIT_SECONDS)
+        task.wait(0.8)
     end
 end
 
-local pickupDebounce = {}
-local function pickup(itemName)
-    while (itemName == "Raw Gold" and state.pickupGold) or (itemName == "Coal" and state.pickupCoal) do
-        local ItemsFolder = Workspace:FindFirstChild("Items")
-        if ItemsFolder then
-            for _, item in ipairs(ItemsFolder:GetChildren()) do
-                if item.Name == itemName and not pickupDebounce[item] then
-                    if itemName == "Raw Gold" and state.tpRawGoldToChest then
-                        continue
-                    end
-                    
-                    pickupDebounce[item] = true
-                    local t0 = os.clock()
-                    local id = item:GetAttribute("EntityID")
-                    while item.Parent == ItemsFolder and not id and os.clock() - t0 < 1 do
-                        task.wait(0.015)
-                        id = item:GetAttribute("EntityID")
-                    end
-                    if id then
-                        for i = 1, 15 do
-                            if not item or item.Parent ~= ItemsFolder then break end
+-- Ultra-Fast Instant Pickup
+local function createInstantPickup(itemName, checkChests, stateKey)
+    return function()
+        local pickupCache = {}
+        while S[stateKey] do
+            if CachedItems.Items then
+                for _, item in ipairs(CachedItems.Items:GetChildren()) do
+                    if item.Name == itemName and not pickupCache[item] then
+                        local id = item:GetAttribute("EntityID")
+                        if id then
+                            pickupCache[item] = true
                             Packets.Pickup.send(id)
-                            task.wait(0.03)
+                            Packets.Pickup.send(id)
+                            Packets.Pickup.send(id)
+                            task.delay(0.5, function() pickupCache[item] = nil end)
                         end
                     end
-                    task.delay(0.4, function() pickupDebounce[item] = nil end)
                 end
             end
+            
+            if checkChests and CachedItems.Deployables then
+                for _, chest in ipairs(CachedItems.Deployables:GetChildren()) do
+                    local contents = chest:FindFirstChild("Contents")
+                    if contents then
+                        for _, item in ipairs(contents:GetChildren()) do
+                            if item.Name == itemName and not pickupCache[item] then
+                                local id = item:GetAttribute("EntityID")
+                                if id then
+                                    pickupCache[item] = true
+                                    Packets.Pickup.send(id)
+                                    Packets.Pickup.send(id)
+                                    Packets.Pickup.send(id)
+                                    task.delay(0.5, function() pickupCache[item] = nil end)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            RunService.Heartbeat:Wait()
         end
-        task.wait(0.05)
     end
 end
 
+local pickupGolds = createInstantPickup("Raw Gold", false, "pickupGold")
+local pickupCoals = createInstantPickup("Coal", false, "pickupCoal")
+local pickupCoins = createInstantPickup("Coin", false, "pickupCoins")
+
+-- Optimized Utilities
 local function getDeployable(name, range)
-    local deployablesFolder = Workspace:FindFirstChild("Deployables")
-    if not deployablesFolder or not Root then return nil end
+    if not CachedItems.Deployables or not Root then return nil end
     
-    range = tonumber(range) or math.huge
-    local closest, closestDist = nil, range
+    local closest, closestDist = nil, range or math.huge
+    local rootPos = Root.Position
     
-    for _, v in ipairs(deployablesFolder:GetChildren()) do
+    for _, v in ipairs(CachedItems.Deployables:GetChildren()) do
         if v.Name == name and v:IsA("Model") then
-            local ok, pivot = pcall(function() return v:GetPivot() end)
-            if ok and pivot then
-                local dist = (Root.Position - pivot.Position).Magnitude
+            local ok, pivot = pcall(v.GetPivot, v)
+            if ok then
+                local dist = (rootPos - pivot.Position).Magnitude
                 if dist < closestDist then
                     closest, closestDist = v, dist
                 end
@@ -263,78 +262,48 @@ local function getDeployable(name, range)
 end
 
 local function getQuantity(name)
-    for x, v in next, GameUtil.getData().inventory do
-        if v.name == name then
-            return v.quantity, x
-        end
+    for _, v in next, GameUtil.getData().inventory do
+        if v.name == name then return v.quantity end
     end
     return 0
 end
 
-local SEND_DT = 0.01
-local LOOKUP_DT = 1
-local BURST_MAX = 10
-
+-- Ultra-Fast Coin Press (Optimized)
 local function pressCoins()
-    local press, entityID, lastLookup, lastSend = nil, nil, 0, 0
-
-    while state.coinPress do
-        local now = os.clock()
-
-        if (not press or not press.Parent or (now - lastLookup) >= LOOKUP_DT) then
+    local press, entityID = nil, nil
+    while S.coinPress do
+        if not press or not press.Parent then
             press = getDeployable("Coin Press", 25)
-            entityID = (press and press:GetAttribute("EntityID")) or nil
-            lastLookup = now
+            entityID = press and press:GetAttribute("EntityID")
+            if not entityID then task.wait(0.5) continue end
         end
-
-        if entityID then
-            local goldAmt = getQuantity("Gold") or 0
-            if goldAmt > 0 and (now - lastSend) >= SEND_DT then
-                local n = math.min(goldAmt, BURST_MAX)
-                for i = 1, n do
-                    Packets.InteractStructure.send({ entityID = entityID, itemID = ItemIDS.Gold })
-                end
-                lastSend = now
+        
+        local goldAmt = getQuantity("Gold")
+        if goldAmt > 0 then
+            local batchSize = math.min(goldAmt, 25)
+            for i = 1, batchSize do
+                Packets.InteractStructure.send({ entityID = entityID, itemID = ItemIDS.Gold })
             end
         end
-
-        task.wait(0.01)
+        RunService.Heartbeat:Wait()
     end
 end
 
+-- Optimized Campfire
 local function campfireRefuelLoop()
-    while state.campfireFuel do
-        local deployablesFolder = Workspace:FindFirstChild("Deployables")
-        
-        if deployablesFolder and Root then
-            for _, structure in ipairs(deployablesFolder:GetChildren()) do
-                local dist = (structure:GetPivot().Position - Root.Position).Magnitude
-                
-                if structure.Name == "Campfire" and structure:GetAttribute("EntityID") and dist <= 40 then
-                    local board = structure:FindFirstChild("Board")
-                    local billboard = board and board:FindFirstChild("Billboard")
-                    local backdrop = billboard and billboard:FindFirstChild("Backdrop")
-                    local textLabel = backdrop and backdrop:FindFirstChild("TextLabel")
+    while S.campfireFuel do
+        if CachedItems.Deployables and Root then
+            local rootPos = Root.Position
+            for _, structure in ipairs(CachedItems.Deployables:GetChildren()) do
+                if structure.Name == "Campfire" and (structure:GetPivot().Position - rootPos).Magnitude <= 40 then
+                    local entityID = structure:GetAttribute("EntityID")
+                    local textLabel = structure:FindFirstChild("Board", true) and structure.Board:FindFirstChild("Billboard", true) and structure.Board.Billboard:FindFirstChild("Backdrop", true) and structure.Board.Billboard.Backdrop:FindFirstChild("TextLabel")
                     
-                    if textLabel then
+                    if entityID and textLabel then
                         local fireValue = tonumber(textLabel.Text) or 999
-                        
                         if fireValue <= 200 then
-                            local amount = 0
-                            local tempFire = fireValue
-                            
-                            for i = 1, 10 do
-                                if tempFire >= 250 then break end
-                                tempFire = tempFire + 50
-                                amount = amount + 1
-                            end
-                            
-                            for i = 1, amount do
-                                Packets.InteractStructure.send({
-                                    entityID = structure:GetAttribute("EntityID"),
-                                    itemID = ItemIDS.Coal
-                                })
-                                task.wait(0.05)
+                            for i = 1, math.min(10, math.floor((250 - fireValue) / 50)) do
+                                Packets.InteractStructure.send({ entityID = entityID, itemID = ItemIDS.Coal })
                             end
                         end
                     end
@@ -345,1039 +314,482 @@ local function campfireRefuelLoop()
     end
 end
 
-local tpRawGoldRunning = false
+-- Ultra-Fast TP Gold to Chest (Maximum Speed)
 local function tpRawGoldLoop()
-    tpRawGoldRunning = true
-    
-    while state.tpRawGoldToChest and tpRawGoldRunning do
-        if not chest or not chest.Parent then
-            chest = getDeployable("Chest", 100)
-            if not chest then
-                warn("no chest found")
-                task.wait(1)
-                continue
+    local chestPos = nil
+    while S.tpRawGoldToChest do
+        if not S.chest or not S.chest.Parent then
+            S.chest = getDeployable("Chest", 100)
+            if not S.chest then 
+                task.wait(0.5) 
+                continue 
             end
+            chestPos = S.chest:GetPivot()
         end
-        
-        local chestPos = chest:GetPivot()
         
         local inventory = GameUtil.getData().inventory
         for idx, data in pairs(inventory) do
             if data.name == "Raw Gold" and data.quantity > 0 then
-                Packets.DropBagItem.send(idx, 1)
+                local dropAmount = math.min(data.quantity, 50)
+                for i = 1, dropAmount do
+                    Packets.DropBagItem.send(idx, 1)
+                end
                 
-                task.wait(0.1)
+                task.wait(0.05)
                 
-                local items = Workspace:FindFirstChild("Items")
-                if items then
-                    for _, item in ipairs(items:GetChildren()) do
-                        if item.Name == "Raw Gold" and item.Parent == items then
+                if CachedItems.Items then
+                    for _, item in ipairs(CachedItems.Items:GetChildren()) do
+                        if item.Name == "Raw Gold" then
                             local id = item:GetAttribute("EntityID")
-                            
-                            local attempts = 0
-                            while not id and item.Parent == items and attempts < 15 do
-                                task.wait(0.01)
-                                id = item:GetAttribute("EntityID")
-                                attempts = attempts + 1
-                            end
-                            
-                            if id and item.Parent == items and chest and chest.Parent then
+                            if id then
                                 Packets.ForceInteract.send(id)
-                                task.wait(0.02)
-                                
-                                pcall(function()
-                                    if item and item.Parent == items then
-                                        item:PivotTo(chestPos * CFrame.new(0, 2, 0))
-                                    end
-                                end)
-                                
-                                task.wait(0.02)
-                                
+                                pcall(item.PivotTo, item, chestPos * CFrame.new(0, 2, 0))
                                 Packets.ForceInteract.send()
-                                
-                                break
                             end
                         end
                     end
                 end
-                
-                task.wait(0.05)
                 break
             end
         end
-        
-        task.wait(0.05)
+        RunService.Heartbeat:Wait()
     end
-    tpRawGoldRunning = false
 end
 
+-- Pickup Gold from Chest (Ultra Fast)
 local function pickupGoldFromChestLoop()
-    while state.pickupGoldFromChest do
-        if not chest or not chest.Parent then
-            chest = getDeployable("Chest", 100)
-            if not chest then
-                warn("no chest found")
-                task.wait(1)
-                continue
-            end
+    while S.pickupGoldFromChest do
+        if not S.chest or not S.chest.Parent then
+            S.chest = getDeployable("Chest", 100)
+            if not S.chest then task.wait(1) continue end
         end
         
-        local contents = chest:FindFirstChild("Contents")
+        local contents = S.chest:FindFirstChild("Contents")
         if contents then
             for _, item in ipairs(contents:GetChildren()) do
                 if item.Name == "Gold" then
                     local id = item:GetAttribute("EntityID")
                     if id then
-                        for i = 1, 8 do
-                            if not item or item.Parent ~= contents then break end
-                            Packets.Pickup.send(id)
-                            task.wait(0.05)
-                        end
+                        for i = 1, 5 do Packets.Pickup.send(id) end
                     end
                 end
             end
         end
-        task.wait(0.25)
+        RunService.Heartbeat:Wait()
     end
 end
 
-local function pickupCoinsLoop()
-    while state.pickupCoins do
-        local items = Workspace:FindFirstChild("Items")
-        if items then
-            for _, item in ipairs(items:GetChildren()) do
-                if item.Name == "Coin" and not pickupDebounce[item] then
-                    pickupDebounce[item] = true
-                    local id = item:GetAttribute("EntityID")
-                    local t = os.clock()
-                    while not id and item.Parent == items and os.clock() - t < 1 do
-                        task.wait(0.03)
-                        id = item:GetAttribute("EntityID")
-                    end
-                    if id then
-                        for i = 1, 10 do
-                            if not item or item.Parent ~= items then break end
-                            Packets.Pickup.send(id)
-                            task.wait(0.025)
-                        end
-                    end
-                    task.delay(0.8, function() pickupDebounce[item] = nil end)
-                end
-            end
+-- Performance Optimization: Black Screen
+local blackScreenGui = nil
+local originalLightingSettings = {}
+
+local function enableBlackScreen()
+    if not blackScreenGui then
+        blackScreenGui = Instance.new("ScreenGui")
+        blackScreenGui.Name = "BlackScreenOptimizer"
+        blackScreenGui.IgnoreGuiInset = true
+        blackScreenGui.ResetOnSpawn = false
+        
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(1, 0, 1, 0)
+        frame.BackgroundColor3 = Color3.new(0, 0, 0)
+        frame.BorderSizePixel = 0
+        frame.Parent = blackScreenGui
+        
+        blackScreenGui.Parent = Player:WaitForChild("PlayerGui")
+    end
+    
+    originalLightingSettings = {
+        Brightness = Lighting.Brightness,
+        GlobalShadows = Lighting.GlobalShadows,
+        OutdoorAmbient = Lighting.OutdoorAmbient,
+        Ambient = Lighting.Ambient,
+    }
+    
+    Lighting.Brightness = 0
+    Lighting.GlobalShadows = false
+    Lighting.OutdoorAmbient = Color3.new(0, 0, 0)
+    Lighting.Ambient = Color3.new(0, 0, 0)
+    
+    for _, effect in pairs(Lighting:GetChildren()) do
+        if effect:IsA("PostEffect") then
+            effect.Enabled = false
         end
-        task.wait(0.04)
     end
 end
 
-local function tweenPath()
-    if #settings.positions == 0 then
-        warn("no positions loaded!")
-        state.tween = false
+local function disableBlackScreen()
+    if blackScreenGui then
+        blackScreenGui:Destroy()
+        blackScreenGui = nil
+    end
+    
+    if originalLightingSettings.Brightness then
+        Lighting.Brightness = originalLightingSettings.Brightness
+        Lighting.GlobalShadows = originalLightingSettings.GlobalShadows
+        Lighting.OutdoorAmbient = originalLightingSettings.OutdoorAmbient
+        Lighting.Ambient = originalLightingSettings.Ambient
+    end
+    
+    for _, effect in pairs(Lighting:GetChildren()) do
+        if effect:IsA("PostEffect") then
+            effect.Enabled = true
+        end
+    end
+end
+
+-- Tween System with Config Support
+local activeTween = nil
+
+local function tweenToPosition(targetPos)
+    if not Root or not Root.Parent then return end
+    
+    -- Convert table to Vector3 if needed
+    local targetVector3
+    if typeof(targetPos) == "Vector3" then
+        targetVector3 = targetPos
+    elseif type(targetPos) == "table" and targetPos.X and targetPos.Y and targetPos.Z then
+        targetVector3 = Vector3.new(targetPos.X, targetPos.Y, targetPos.Z)
+    else
         return
     end
-
-    local function nearestIndex(fromPos)
-        local bestI, bestD = 1, math.huge
-        for j = 1, #settings.positions do
-            local p = settings.positions[j]
-            if p and p.X and p.Y and p.Z then
-                local d = (fromPos - Vector3.new(p.X, p.Y, p.Z)).Magnitude
-                if d < bestD then bestI, bestD = j, d end
-            end
-        end
-        return bestI
+    
+    local distance = (targetVector3 - Root.Position).Magnitude
+    local duration = distance / S.tweenSpeed
+    
+    if activeTween then
+        activeTween:Cancel()
     end
+    
+    local tweenInfo = TweenInfo.new(
+        duration,
+        Enum.EasingStyle.Linear,
+        Enum.EasingDirection.InOut
+    )
+    
+    activeTween = TweenService:Create(Root, tweenInfo, {CFrame = CFrame.new(targetVector3)})
+    activeTween:Play()
+    activeTween.Completed:Wait()
+end
 
-    local curIndex = nearestIndex(Root.Position)
-    local REACH_RADIUS = 4
-    local MIN_IMPROVE_STUDS = 0.75
-    local NO_PROGRESS_SECS = 2.5
-    local RUBBERBAND_CHECK_INTERVAL = 0.3
-    local RUBBERBAND_THRESHOLD = 15
-    local lastValidIndex = curIndex
-
-    while state.tween do
-        if not Root or not Root.Parent or not Humanoid or not Humanoid.Parent then
+local function startTweenLoop()
+    while S.tween and S.isMoving do
+        if #S.positions == 0 then
             task.wait(1)
             continue
         end
-
-        local pos = settings.positions[curIndex]
-        if not (pos and pos.X and pos.Y and pos.Z) then
-            curIndex = (curIndex % #settings.positions) + 1
-            task.wait(0.05)
-            continue
-        end
-
-        local targetPos = Vector3.new(pos.X, pos.Y, pos.Z)
-        local startPos = Root.Position
-        local dist = (startPos - targetPos).Magnitude
-        local speed = settings.tweenSpeed
-        local duration = math.max(0.02, dist / speed)
-
-        if connections.tweenConn then
-            connections.tweenConn:Disconnect()
-            connections.tweenConn = nil
-        end
-        if connections.tween then
-            connections.tween:Cancel()
-            connections.tween = nil
-        end
-
-        local ti = TweenInfo.new(duration, Enum.EasingStyle.Linear)
-        connections.tween = TweenService:Create(Root, ti, {CFrame = CFrame.new(targetPos)})
-
-        local completed = false
-        local t0 = tick()
-        local lastPoll = t0
-        local lastDist = (Root.Position - targetPos).Magnitude
-        local lastRubberbandCheck = t0
-        local lastRubberbandPos = Root.Position
-        local rubberbandDetected = false
-
-        connections.tweenConn = connections.tween.Completed:Connect(function()
-            completed = true
-            if connections.tweenConn then
-                connections.tweenConn:Disconnect()
-                connections.tweenConn = nil
-            end
-        end)
-
-        connections.tween:Play()
-
-        while state.tween and not completed do
-            task.wait(0.2)
-            
-            local now = tick()
-            local curDist = (Root.Position - targetPos).Magnitude
-            
-            if curDist <= REACH_RADIUS then
-                completed = true
-                lastValidIndex = curIndex
-                break
-            end
-
-            if (now - lastRubberbandCheck) >= RUBBERBAND_CHECK_INTERVAL then
-                local movedDist = (Root.Position - lastRubberbandPos).Magnitude
-                if movedDist > RUBBERBAND_THRESHOLD then
-                    warn("⚠️ rubberband detected! returning to previous waypoint")
-                    rubberbandDetected = true
-                    break
-                end
-                lastRubberbandCheck = now
-                lastRubberbandPos = Root.Position
-            end
-
-            if (now - lastPoll) > NO_PROGRESS_SECS and (lastDist - curDist) < MIN_IMPROVE_STUDS then
-                warn("⚠️ stuck detected! returning to previous waypoint")
-                rubberbandDetected = true
-                break
-            end
-
-            lastPoll = now
-            lastDist = curDist
-        end
-
-        if connections.tweenConn then
-            connections.tweenConn:Disconnect()
-            connections.tweenConn = nil
-        end
-        if connections.tween then
-            connections.tween:Cancel()
-            connections.tween = nil
-        end
-
-        if rubberbandDetected then
-            curIndex = lastValidIndex
-            warn("↩️ teleporting back to waypoint #" .. curIndex)
-            local prevPos = settings.positions[curIndex]
-            if prevPos and prevPos.X and prevPos.Y and prevPos.Z then
-                Root.CFrame = CFrame.new(Vector3.new(prevPos.X, prevPos.Y, prevPos.Z))
-                task.wait(0.5)
-            end
-        else
-            curIndex = (curIndex % #settings.positions) + 1
-            lastValidIndex = curIndex
-        end
         
-        task.wait(settings.waitTime)
+        local targetPos = S.positions[S.currentTargetIndex]
+        if targetPos then
+            tweenToPosition(targetPos)
+            task.wait(S.waitTime)
+            S.currentTargetIndex = (S.currentTargetIndex % #S.positions) + 1
+        end
+        task.wait()
     end
-
-    Root.Anchored = false
 end
 
-local gui = Instance.new("ScreenGui")
-gui.Name = "GoldFarm"
-gui.ResetOnSpawn = false
-gui.Parent = game.CoreGui
+-- Wait for UI to load
+repeat task.wait(0.1) until Library
 
-local main = Instance.new("Frame")
-main.Size = UDim2.new(0, 460, 0, 560)
-main.Position = UDim2.new(0.5, -230, 0.5, -280)
-main.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-main.BorderSizePixel = 0
-main.Parent = gui
+-- GUI Setup
+local Window = Library:CreateWindow({
+    Title = 'Gold Farm Hub',
+    Center = true,
+    AutoShow = true,
+    TabPadding = 8,
+    MenuFadeTime = 0.2
+})
 
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 18)
-corner.Parent = main
-
-local gradient = Instance.new("UIGradient")
-gradient.Color = ColorSequence.new{
-    ColorSequenceKeypoint.new(0, Color3.fromRGB(20, 20, 25)),
-    ColorSequenceKeypoint.new(1, Color3.fromRGB(25, 25, 32))
+local Tabs = {
+    Main = Window:AddTab('Main'),
+    Extras = Window:AddTab('Extras'),
+    Performance = Window:AddTab('Performance'),
+    ['UI Settings'] = Window:AddTab('UI Settings'),
 }
-gradient.Rotation = 45
-gradient.Parent = main
 
-local shadow = Instance.new("ImageLabel")
-shadow.Name = "Shadow"
-shadow.Size = UDim2.new(1, 40, 1, 40)
-shadow.Position = UDim2.new(0, -20, 0, -20)
-shadow.BackgroundTransparency = 1
-shadow.Image = "rbxasset://textures/ui/InspectMenu/Shadow.png"
-shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
-shadow.ImageTransparency = 0.3
-shadow.ScaleType = Enum.ScaleType.Slice
-shadow.SliceCenter = Rect.new(10, 10, 118, 118)
-shadow.ZIndex = 0
-shadow.Parent = main
+-- Main Tab
+local MainBox = Tabs.Main:AddLeftGroupbox('Main')
 
-local header = Instance.new("Frame")
-header.Size = UDim2.new(1, 0, 0, 60)
-header.BackgroundColor3 = Color3.fromRGB(255, 200, 50)
-header.BorderSizePixel = 0
-header.Parent = main
-
-local hGradient = Instance.new("UIGradient")
-hGradient.Color = ColorSequence.new{
-    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 215, 0)),
-    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 200, 50)),
-    ColorSequenceKeypoint.new(1, Color3.fromRGB(218, 165, 32))
-}
-hGradient.Rotation = 90
-hGradient.Parent = header
-
-local hCorner = Instance.new("UICorner")
-hCorner.CornerRadius = UDim.new(0, 18)
-hCorner.Parent = header
-
-local hFix = Instance.new("Frame")
-hFix.Size = UDim2.new(1, 0, 0, 18)
-hFix.Position = UDim2.new(0, 0, 1, -18)
-hFix.BackgroundColor3 = Color3.fromRGB(218, 165, 32)
-hFix.BorderSizePixel = 0
-hFix.Parent = header
-
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, -70, 1, 0)
-title.Position = UDim2.new(0, 18, 0, 0)
-title.BackgroundTransparency = 1
-title.Text = "💰 Gold Farm"
-title.TextColor3 = Color3.fromRGB(40, 40, 45)
-title.TextSize = 28
-title.Font = Enum.Font.GothamBold
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.Parent = header
-
-local close = Instance.new("TextButton")
-close.Size = UDim2.new(0, 40, 0, 40)
-close.Position = UDim2.new(1, -50, 0, 10)
-close.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
-close.Text = "×"
-close.TextColor3 = Color3.fromRGB(255, 255, 255)
-close.TextSize = 26
-close.Font = Enum.Font.GothamBold
-close.Parent = header
-
-local cCorner = Instance.new("UICorner")
-cCorner.CornerRadius = UDim.new(0, 10)
-cCorner.Parent = close
-
-close.MouseEnter:Connect(function()
-    TweenService:Create(close, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(255, 80, 80), TextSize = 28}):Play()
+MainBox:AddButton('Anti-AFK', function()
+    setupAntiAFK()
+    Library:Notify('Anti-AFK enabled!')
 end)
 
-close.MouseLeave:Connect(function()
-    TweenService:Create(close, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(40, 40, 45), TextSize = 26}):Play()
-end)
-
-close.MouseButton1Click:Connect(function()
-    TweenService:Create(close, TweenInfo.new(0.1), {Rotation = 90}):Play()
-    task.wait(0.1)
-    gui.Enabled = false
-    close.Rotation = 0
-end)
-
-UIS.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
-    
-    if input.KeyCode == Enum.KeyCode.LeftControl then
-        gui.Enabled = not gui.Enabled
-    end
-end)
-
-local tabContainer = Instance.new("Frame")
-tabContainer.Size = UDim2.new(1, -24, 0, 48)
-tabContainer.Position = UDim2.new(0, 12, 0, 72)
-tabContainer.BackgroundTransparency = 1
-tabContainer.Parent = main
-
-local tabLayout = Instance.new("UIListLayout")
-tabLayout.FillDirection = Enum.FillDirection.Horizontal
-tabLayout.Padding = UDim.new(0, 10)
-tabLayout.Parent = tabContainer
-
-local scroll = Instance.new("ScrollingFrame")
-scroll.Size = UDim2.new(1, -24, 1, -138)
-scroll.Position = UDim2.new(0, 12, 0, 132)
-scroll.BackgroundTransparency = 1
-scroll.BorderSizePixel = 0
-scroll.ScrollBarThickness = 6
-scroll.ScrollBarImageColor3 = Color3.fromRGB(255, 200, 50)
-scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-scroll.Parent = main
-
-local mainContent = Instance.new("Frame")
-mainContent.Size = UDim2.new(1, 0, 0, 0)
-mainContent.BackgroundTransparency = 1
-mainContent.Visible = true
-mainContent.AutomaticSize = Enum.AutomaticSize.Y
-mainContent.Parent = scroll
-
-local extraContent = Instance.new("Frame")
-extraContent.Size = UDim2.new(1, 0, 0, 0)
-extraContent.BackgroundTransparency = 1
-extraContent.Visible = false
-extraContent.AutomaticSize = Enum.AutomaticSize.Y
-extraContent.Parent = scroll
-
-local mainLayout = Instance.new("UIListLayout")
-mainLayout.Padding = UDim.new(0, 14)
-mainLayout.Parent = mainContent
-
-local extraLayout = Instance.new("UIListLayout")
-extraLayout.Padding = UDim.new(0, 14)
-extraLayout.Parent = extraContent
-
-local tabSwitchCooldown = false
-local function createTab(name, icon)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0, 140, 1, 0)
-    btn.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
-    btn.Text = icon .. " " .. name
-    btn.TextColor3 = Color3.fromRGB(180, 180, 185)
-    btn.TextSize = 16
-    btn.Font = Enum.Font.GothamBold
-    btn.Parent = tabContainer
-    
-    local btnCorner = Instance.new("UICorner")
-    btnCorner.CornerRadius = UDim.new(0, 10)
-    btnCorner.Parent = btn
-    
-    btn.MouseEnter:Connect(function()
-        if not btn:FindFirstChild("Active") then
-            TweenService:Create(btn, TweenInfo.new(0.2), {
-                BackgroundColor3 = Color3.fromRGB(40, 40, 45),
-                Size = UDim2.new(0, 145, 1, 0)
-            }):Play()
-        end
-    end)
-    
-    btn.MouseLeave:Connect(function()
-        if not btn:FindFirstChild("Active") then
-            TweenService:Create(btn, TweenInfo.new(0.2), {
-                BackgroundColor3 = Color3.fromRGB(30, 30, 35),
-                Size = UDim2.new(0, 140, 1, 0)
-            }):Play()
-        end
-    end)
-    
-    btn.MouseButton1Click:Connect(function()
-        if tabSwitchCooldown then return end
-        tabSwitchCooldown = true
-        
-        for _, child in ipairs(tabContainer:GetChildren()) do
-            if child:IsA("TextButton") then
-                if child:FindFirstChild("Active") then
-                    child.Active:Destroy()
-                end
-                TweenService:Create(child, TweenInfo.new(0.2), {
-                    BackgroundColor3 = Color3.fromRGB(30, 30, 35),
-                    TextColor3 = Color3.fromRGB(180, 180, 185),
-                    Size = UDim2.new(0, 140, 1, 0)
-                }):Play()
-            end
-        end
-        
-        if name == "Main" then
-            mainContent.Visible = true
-            extraContent.Visible = false
-        elseif name == "Extra" then
-            extraContent.Visible = true
-            mainContent.Visible = false
-        end
-        
-        local active = Instance.new("BoolValue")
-        active.Name = "Active"
-        active.Parent = btn
-        
-        TweenService:Create(btn, TweenInfo.new(0.2), {
-            BackgroundColor3 = Color3.fromRGB(255, 200, 50),
-            TextColor3 = Color3.fromRGB(40, 40, 45),
-            Size = UDim2.new(0, 145, 1, 0)
-        }):Play()
-        
-        settings.currentTab = name
-        
-        task.delay(0.3, function()
-            tabSwitchCooldown = false
-        end)
-    end)
-    
-    return btn
-end
-
-createTab("Main", "🏠")
-createTab("Extra", "⚙️")
-
-local function toggle(name, icon, callback, parent)
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 70)
-    frame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
-    frame.BorderSizePixel = 0
-    frame.Parent = parent or mainContent
-    
-    local fCorner = Instance.new("UICorner")
-    fCorner.CornerRadius = UDim.new(0, 12)
-    fCorner.Parent = frame
-    
-    local fGradient = Instance.new("UIGradient")
-    fGradient.Color = ColorSequence.new{
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 30, 35)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(35, 35, 42))
-    }
-    fGradient.Rotation = 90
-    fGradient.Parent = frame
-    
-    local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(0.62, 0, 1, 0)
-    label.Position = UDim2.new(0, 15, 0, 0)
-    label.BackgroundTransparency = 1
-    label.Text = icon .. " " .. name
-    label.TextColor3 = Color3.fromRGB(240, 240, 245)
-    label.TextSize = 16
-    label.Font = Enum.Font.GothamBold
-    label.TextXAlignment = Enum.TextXAlignment.Left
-    label.TextWrapped = true
-    label.Parent = frame
-    
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0, 62, 0, 32)
-    btn.Position = UDim2.new(1, -72, 0.5, -16)
-    btn.BackgroundColor3 = Color3.fromRGB(50, 50, 55)
-    btn.Text = "OFF"
-    btn.TextColor3 = Color3.fromRGB(200, 200, 205)
-    btn.TextSize = 14
-    btn.Font = Enum.Font.GothamBold
-    btn.Parent = frame
-    
-    local bCorner = Instance.new("UICorner")
-    bCorner.CornerRadius = UDim.new(0, 8)
-    bCorner.Parent = btn
-    
-    local on = false
-    btn.MouseButton1Click:Connect(function()
-        on = not on
-        btn.Text = on and "ON" or "OFF"
-        
-        TweenService:Create(btn, TweenInfo.new(0.25), {
-            BackgroundColor3 = on and Color3.fromRGB(50, 205, 50) or Color3.fromRGB(50, 50, 55),
-            TextColor3 = Color3.fromRGB(255, 255, 255),
-            Size = UDim2.new(0, on and 65 or 62, 0, 32)
-        }):Play()
-        
-        TweenService:Create(label, TweenInfo.new(0.25), {
-            TextColor3 = on and Color3.fromRGB(50, 205, 50) or Color3.fromRGB(240, 240, 245)
-        }):Play()
-        
-        callback(on)
-    end)
-    
-    btn.MouseEnter:Connect(function()
-        TweenService:Create(btn, TweenInfo.new(0.15), {
-            Size = UDim2.new(0, on and 68 or 65, 0, 32)
-        }):Play()
-    end)
-    
-    btn.MouseLeave:Connect(function()
-        TweenService:Create(btn, TweenInfo.new(0.15), {
-            Size = UDim2.new(0, on and 65 or 62, 0, 32)
-        }):Play()
-    end)
-    
-    return {frame = frame, button = btn, state = on}
-end
-
-local function slider(name, min, max, def, callback, parent)
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 90)
-    frame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
-    frame.BorderSizePixel = 0
-    frame.Parent = parent or mainContent
-    
-    local fCorner = Instance.new("UICorner")
-    fCorner.CornerRadius = UDim.new(0, 12)
-    fCorner.Parent = frame
-    
-    local fGradient = Instance.new("UIGradient")
-    fGradient.Color = ColorSequence.new{
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 30, 35)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(35, 35, 42))
-    }
-    fGradient.Rotation = 90
-    fGradient.Parent = frame
-    
-    local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(1, -24, 0, 30)
-    label.Position = UDim2.new(0, 15, 0, 10)
-    label.BackgroundTransparency = 1
-    label.Text = name .. ": " .. def
-    label.TextColor3 = Color3.fromRGB(240, 240, 245)
-    label.TextSize = 15
-    label.Font = Enum.Font.GothamBold
-    label.TextXAlignment = Enum.TextXAlignment.Left
-    label.Parent = frame
-    
-    local bar = Instance.new("Frame")
-    bar.Size = UDim2.new(1, -30, 0, 12)
-    bar.Position = UDim2.new(0, 15, 0, 50)
-    bar.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
-    bar.BorderSizePixel = 0
-    bar.Parent = frame
-    
-    local bCorner = Instance.new("UICorner")
-    bCorner.CornerRadius = UDim.new(1, 0)
-    bCorner.Parent = bar
-    
-    local fill = Instance.new("Frame")
-    fill.Size = UDim2.new((def - min) / (max - min), 0, 1, 0)
-    fill.BackgroundColor3 = Color3.fromRGB(255, 200, 50)
-    fill.BorderSizePixel = 0
-    fill.Parent = bar
-    
-    local fCorner2 = Instance.new("UICorner")
-    fCorner2.CornerRadius = UDim.new(1, 0)
-    fCorner2.Parent = fill
-    
-    local fillGradient = Instance.new("UIGradient")
-    fillGradient.Color = ColorSequence.new{
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 215, 0)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(218, 165, 32))
-    }
-    fillGradient.Parent = fill
-    
-    local drag = Instance.new("TextButton")
-    drag.Size = UDim2.new(0, 26, 0, 26)
-    drag.Position = UDim2.new((def - min) / (max - min), -13, 0.5, -13)
-    drag.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    drag.Text = ""
-    drag.Parent = bar
-    
-    local dCorner = Instance.new("UICorner")
-    dCorner.CornerRadius = UDim.new(1, 0)
-    dCorner.Parent = drag
-    
-    local dGradient = Instance.new("UIGradient")
-    dGradient.Color = ColorSequence.new{
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 240, 200)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 255, 255))
-    }
-    dGradient.Rotation = 45
-    dGradient.Parent = drag
-    
-    local dragging = false
-    local val = def
-    
-    drag.MouseButton1Down:Connect(function()
-        dragging = true
-        TweenService:Create(drag, TweenInfo.new(0.15), {Size = UDim2.new(0, 30, 0, 30)}):Play()
-    end)
-    
-    UIS.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = false
-            TweenService:Create(drag, TweenInfo.new(0.15), {Size = UDim2.new(0, 26, 0, 26)}):Play()
-        end
-    end)
-    
-    RunService.RenderStepped:Connect(function()
-        if dragging then
-            local mouse = LocalPlayer:GetMouse()
-            local x = math.clamp(mouse.X - bar.AbsolutePosition.X, 0, bar.AbsoluteSize.X)
-            local pct = x / bar.AbsoluteSize.X
-            val = math.floor(min + (max - min) * pct)
-            
-            fill.Size = UDim2.new(pct, 0, 1, 0)
-            drag.Position = UDim2.new(pct, -13, 0.5, -13)
-            label.Text = name .. ": " .. val
-            
-            callback(val)
-        end
-    end)
-end
-
-local function dropdown(name, opts, def, callback, parent)
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 70)
-    frame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
-    frame.BorderSizePixel = 0
-    frame.Parent = parent or mainContent
-    
-    local fCorner = Instance.new("UICorner")
-    fCorner.CornerRadius = UDim.new(0, 12)
-    fCorner.Parent = frame
-    
-    local fGradient = Instance.new("UIGradient")
-    fGradient.Color = ColorSequence.new{
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 30, 35)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(35, 35, 42))
-    }
-    fGradient.Rotation = 90
-    fGradient.Parent = frame
-    
-    local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(1, -24, 0, 24)
-    label.Position = UDim2.new(0, 15, 0, 8)
-    label.BackgroundTransparency = 1
-    label.Text = name
-    label.TextColor3 = Color3.fromRGB(240, 240, 245)
-    label.TextSize = 15
-    label.Font = Enum.Font.GothamBold
-    label.TextXAlignment = Enum.TextXAlignment.Left
-    label.Parent = frame
-    
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -30, 0, 30)
-    btn.Position = UDim2.new(0, 15, 0, 35)
-    btn.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
-    btn.Text = def
-    btn.TextColor3 = Color3.fromRGB(240, 240, 245)
-    btn.TextSize = 14
-    btn.Font = Enum.Font.GothamSemibold
-    btn.Parent = frame
-    
-    local bCorner = Instance.new("UICorner")
-    bCorner.CornerRadius = UDim.new(0, 8)
-    bCorner.Parent = btn
-    
-    local arrow = Instance.new("TextLabel")
-    arrow.Size = UDim2.new(0, 30, 1, 0)
-    arrow.Position = UDim2.new(1, -30, 0, 0)
-    arrow.BackgroundTransparency = 1
-    arrow.Text = "▼"
-    arrow.TextColor3 = Color3.fromRGB(255, 200, 50)
-    arrow.TextSize = 12
-    arrow.Font = Enum.Font.GothamBold
-    arrow.Parent = btn
-    
-    local list = Instance.new("ScrollingFrame")
-    list.Size = UDim2.new(1, -30, 0, 0)
-    list.Position = UDim2.new(0, 15, 0, 70)
-    list.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
-    list.BorderSizePixel = 0
-    list.Visible = false
-    list.ZIndex = 10
-    list.ScrollBarThickness = 6
-    list.ScrollBarImageColor3 = Color3.fromRGB(255, 200, 50)
-    list.CanvasSize = UDim2.new(0, 0, 0, #opts * 34)
-    list.Parent = frame
-    
-    local lCorner = Instance.new("UICorner")
-    lCorner.CornerRadius = UDim.new(0, 8)
-    lCorner.Parent = list
-    
-    local lLayout = Instance.new("UIListLayout")
-    lLayout.Padding = UDim.new(0, 2)
-    lLayout.Parent = list
-    
-    btn.MouseEnter:Connect(function()
-        TweenService:Create(btn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(50, 50, 55)}):Play()
-    end)
-    
-    btn.MouseLeave:Connect(function()
-        TweenService:Create(btn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(45, 45, 50)}):Play()
-    end)
-    
-    btn.MouseButton1Click:Connect(function()
-        list.Visible = not list.Visible
-        if list.Visible then
-            local h = math.min(#opts * 34, 170)
-            TweenService:Create(frame, TweenInfo.new(0.2), {Size = UDim2.new(1, 0, 0, 70 + h + 5)}):Play()
-            list.Size = UDim2.new(1, -30, 0, h)
-            TweenService:Create(arrow, TweenInfo.new(0.2), {Rotation = 180}):Play()
+MainBox:AddToggle('AutoHit', {
+    Text = 'Auto Hit',
+    Default = false,
+    Callback = function(v)
+        S.autoHit = v
+        if v then
+            Connections.autoHit = RunService.Heartbeat:Connect(hitResources)
         else
-            TweenService:Create(frame, TweenInfo.new(0.2), {Size = UDim2.new(1, 0, 0, 70)}):Play()
-            TweenService:Create(arrow, TweenInfo.new(0.2), {Rotation = 0}):Play()
-        end
-    end)
-    
-    for _, opt in ipairs(opts) do
-        local obtn = Instance.new("TextButton")
-        obtn.Size = UDim2.new(1, 0, 0, 32)
-        obtn.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
-        obtn.Text = opt
-        obtn.TextColor3 = Color3.fromRGB(240, 240, 245)
-        obtn.TextSize = 14
-        obtn.Font = Enum.Font.GothamSemibold
-        obtn.BorderSizePixel = 0
-        obtn.Parent = list
-        
-        obtn.MouseEnter:Connect(function()
-            TweenService:Create(obtn, TweenInfo.new(0.15), {
-                BackgroundColor3 = Color3.fromRGB(255, 200, 50),
-                TextColor3 = Color3.fromRGB(40, 40, 45)
-            }):Play()
-        end)
-        
-        obtn.MouseLeave:Connect(function()
-            TweenService:Create(obtn, TweenInfo.new(0.15), {
-                BackgroundColor3 = Color3.fromRGB(45, 45, 50),
-                TextColor3 = Color3.fromRGB(240, 240, 245)
-            }):Play()
-        end)
-        
-        obtn.MouseButton1Click:Connect(function()
-            btn.Text = opt
-            list.Visible = false
-            TweenService:Create(frame, TweenInfo.new(0.2), {Size = UDim2.new(1, 0, 0, 70)}):Play()
-            TweenService:Create(arrow, TweenInfo.new(0.2), {Rotation = 0}):Play()
-            callback(opt)
-        end)
-    end
-end
-
-toggle("Anti-AFK", "⏰", function(on)
-    state.antiAFK = on
-    if on then
-        setupAntiAFK()
-        print("✅ anti-afk enabled")
-    end
-end)
-
-toggle("Auto Hit Resources", "🔨", function(on)
-    state.autoHit = on
-    if on then
-        connections.autoHit = RunService.Heartbeat:Connect(hitResources)
-    else
-        if connections.autoHit then
-            connections.autoHit:Disconnect()
+            if Connections.autoHit then Connections.autoHit:Disconnect() end
         end
     end
-end)
+})
 
-toggle("Noclip (Doors & Boards)", "👻", function(on)
-    state.noclip = on
-    noclip()
-    if on then
-        connections.noclip = RunService.Heartbeat:Connect(noclip)
-    else
-        if connections.noclip then
-            connections.noclip:Disconnect()
-        end
+MainBox:AddToggle('Noclip', {
+    Text = 'Noclip',
+    Default = false,
+    Callback = function(v)
+        S.noclip = v
         noclip()
-    end
-end)
-
-dropdown("Select Fruit", fruitOptions, settings.fruit, function(fruit)
-    settings.fruit = fruit
-end)
-
-toggle("Auto Eat/Heal", "🍎", function(on)
-    state.autoEat = on
-    if on then
-        tasks.autoEat = task.spawn(autoEat)
-    else
-        if tasks.autoEat then
-            task.cancel(tasks.autoEat)
-        end
-    end
-end)
-
-toggle("Position Tween", "🧭", function(on)
-    state.tween = on
-    if on then
-        task.spawn(tweenPath)
-    else
-        if connections.tween then
-            connections.tween:Cancel()
-        end
-    end
-end)
-
-slider("Wait Time (Seconds)", 0, 10, settings.waitTime, function(v)
-    settings.waitTime = v
-end)
-
-toggle("Pickup Raw Gold", "💰", function(on)
-    state.pickupGold = on
-    if on then
-        tasks.pickupGold = task.spawn(function() pickup("Raw Gold") end)
-    else
-        if tasks.pickupGold then
-            task.cancel(tasks.pickupGold)
-        end
-    end
-end)
-
-toggle("Pickup Coal", "⚫", function(on)
-    state.pickupCoal = on
-    if on then
-        tasks.pickupCoal = task.spawn(function() pickup("Coal") end)
-    else
-        if tasks.pickupCoal then
-            task.cancel(tasks.pickupCoal)
-        end
-    end
-end)
-
-toggle("Auto Coin Press", "🪙", function(on)
-    state.coinPress = on
-    if on then
-        tasks.coinPress = task.spawn(pressCoins)
-    else
-        if tasks.coinPress then
-            task.cancel(tasks.coinPress)
-        end
-    end
-end, extraContent)
-
-toggle("Auto Fuel Campfire", "🔥", function(on)
-    state.campfireFuel = on
-    if on then
-        tasks.campfireFuel = task.spawn(campfireRefuelLoop)
-    else
-        if tasks.campfireFuel then
-            task.cancel(tasks.campfireFuel)
-        end
-    end
-end, extraContent)
-
-toggle("TP Raw Gold To Chest", "📦", function(on)
-    state.tpRawGoldToChest = on
-    if on then
-        chest = getDeployable("Chest", 100)
-        if not chest then
-            warn("⚠️ no chest found")
-            state.tpRawGoldToChest = false
-            return
-        end
-        print("✅ tp enabled")
-        tasks.tpRawGold = task.spawn(tpRawGoldLoop)
-    else
-        tpRawGoldRunning = false
-        if tasks.tpRawGold then
-            task.cancel(tasks.tpRawGold)
-            tasks.tpRawGold = nil
-        end
-        print("❌ tp disabled")
-    end
-end, extraContent)
-
-toggle("Pickup Gold From Chest", "💎", function(on)
-    state.pickupGoldFromChest = on
-    if on then
-        chest = getDeployable("Chest", 100)
-        if not chest then
-            warn("no chest found")
-            state.pickupGoldFromChest = false
+        if v then
+            Connections.noclip = RunService.Heartbeat:Connect(noclip)
         else
-            tasks.pickupGoldFromChest = task.spawn(pickupGoldFromChestLoop)
-        end
-    else
-        if tasks.pickupGoldFromChest then
-            task.cancel(tasks.pickupGoldFromChest)
+            if Connections.noclip then Connections.noclip:Disconnect() end
+            noclip()
         end
     end
-end, extraContent)
+})
 
-toggle("Pickup Coins (From Press)", "🪙", function(on)
-    state.pickupCoins = on
-    if on then
-        tasks.pickupCoins = task.spawn(pickupCoinsLoop)
-    else
-        if tasks.pickupCoins then
-            task.cancel(tasks.pickupCoins)
-        end
+MainBox:AddDropdown('FruitSelect', {
+    Values = fruitOptions,
+    Default = 1,
+    Multi = false,
+    Text = 'Select Fruit',
+    Callback = function(v) S.fruit = v end
+})
+
+MainBox:AddToggle('AutoEat', {
+    Text = 'Auto Eat',
+    Default = false,
+    Callback = function(v)
+        S.autoEat = v
+        if v then Tasks.autoEat = task.spawn(autoEat)
+        else if Tasks.autoEat then task.cancel(Tasks.autoEat) end end
     end
-end, extraContent)
+})
 
-local info = Instance.new("Frame")
-info.Size = UDim2.new(1, 0, 0, 70)
-info.BackgroundColor3 = Color3.fromRGB(255, 200, 50)
-info.BackgroundTransparency = 0.05
-info.BorderSizePixel = 0
-info.Parent = mainContent
+-- Tween Tab
+local TweenBox = Tabs.Main:AddRightGroupbox('Tweening')
 
-local iCorner = Instance.new("UICorner")
-iCorner.CornerRadius = UDim.new(0, 12)
-iCorner.Parent = info
-
-local iGradient = Instance.new("UIGradient")
-iGradient.Color = ColorSequence.new{
-    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 215, 0)),
-    ColorSequenceKeypoint.new(1, Color3.fromRGB(218, 165, 32))
-}
-iGradient.Rotation = 45
-iGradient.Transparency = NumberSequence.new(0.85)
-iGradient.Parent = info
-
-local iLabel = Instance.new("TextLabel")
-iLabel.Size = UDim2.new(1, -30, 1, -20)
-iLabel.Position = UDim2.new(0, 15, 0, 10)
-iLabel.BackgroundTransparency = 1
-iLabel.Text = "ℹ️ Loaded " .. #settings.positions .. " positions\n✨ Press Left Control to toggle GUI"
-iLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-iLabel.TextSize = 14
-iLabel.Font = Enum.Font.GothamBold
-iLabel.TextWrapped = true
-iLabel.TextYAlignment = Enum.TextYAlignment.Top
-iLabel.Parent = info
-
-local dragging, dragInput, dragStart, startPos
-
-local function update(input)
-    local delta = input.Position - dragStart
-    TweenService:Create(main, TweenInfo.new(0.12), {
-        Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-    }):Play()
-end
-
-header.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging = true
-        dragStart = input.Position
-        startPos = main.Position
-        
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
+TweenBox:AddToggle('Tween', {
+    Text = 'Enable Tween',
+    Default = false,
+    Callback = function(v)
+        S.tween = v
+        S.isMoving = v
+        if v then
+            task.wait(0.5)
+            if config.positions then
+                S.positions = config.positions
             end
-        end)
+            Tasks.tween = task.spawn(startTweenLoop)
+        else
+            if activeTween then activeTween:Cancel() end
+            if Tasks.tween then task.cancel(Tasks.tween) end
+        end
+    end
+})
+
+TweenBox:AddSlider('Speed', {
+    Text = 'Tween Speed',
+    Default = 20,
+    Min = 5,
+    Max = 50,
+    Rounding = 1,
+    Compact = false,
+    Callback = function(v)
+        S.tweenSpeed = v
+    end
+})
+
+TweenBox:AddSlider('WaitTime', {
+    Text = 'Wait Time (s)',
+    Default = 0.01,
+    Min = 0,
+    Max = 5,
+    Rounding = 2,
+    Compact = false,
+    Callback = function(v)
+        S.waitTime = v
+    end
+})
+
+TweenBox:AddLabel('Positions: Loading...')
+
+task.spawn(function()
+    task.wait(1)
+    if config.positions then
+        S.positions = config.positions
+        TweenBox:AddLabel('Positions: ' .. #S.positions)
     end
 end)
 
-header.InputChanged:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseMovement then
-        dragInput = input
+-- Pickup Section (Now on Main Tab)
+local PickupBox = Tabs.Main:AddLeftGroupbox('Instant Pickup')
+
+PickupBox:AddToggle('PickupGold', {
+    Text = 'Pickup Raw Gold',
+    Default = false,
+    Callback = function(v)
+        S.pickupGold = v
+        if v then Tasks.pickupGold = task.spawn(pickupGolds)
+        else if Tasks.pickupGold then task.cancel(Tasks.pickupGold) end end
+    end
+})
+
+PickupBox:AddToggle('PickupCoal', {
+    Text = 'Pickup Coal',
+    Default = false,
+    Callback = function(v)
+        S.pickupCoal = v
+        if v then Tasks.pickupCoal = task.spawn(pickupCoals)
+        else if Tasks.pickupCoal then task.cancel(Tasks.pickupCoal) end end
+    end
+})
+
+PickupBox:AddToggle('PickupCoins', {
+    Text = 'Pickup Coins',
+    Default = false,
+    Callback = function(v)
+        S.pickupCoins = v
+        if v then Tasks.pickupCoins = task.spawn(pickupCoins)
+        else if Tasks.pickupCoins then task.cancel(Tasks.pickupCoins) end end
+    end
+})
+
+-- Extras Tab
+local ExtrasBox = Tabs.Extras:AddLeftGroupbox('Extras')
+
+ExtrasBox:AddToggle('CoinPress', {
+    Text = 'Auto Coin Press (Ultra Fast)',
+    Default = false,
+    Callback = function(v)
+        S.coinPress = v
+        if v then Tasks.coinPress = task.spawn(pressCoins)
+        else if Tasks.coinPress then task.cancel(Tasks.coinPress) end end
+    end
+})
+
+ExtrasBox:AddToggle('CampfireFuel', {
+    Text = 'Auto Fuel Campfire',
+    Default = false,
+    Callback = function(v)
+        S.campfireFuel = v
+        if v then Tasks.campfireFuel = task.spawn(campfireRefuelLoop)
+        else if Tasks.campfireFuel then task.cancel(Tasks.campfireFuel) end end
+    end
+})
+
+ExtrasBox:AddToggle('TPGoldToChest', {
+    Text = 'TP Gold to Chest (Ultra Fast)',
+    Default = false,
+    Callback = function(v)
+        S.tpRawGoldToChest = v
+        if v then
+            S.chest = getDeployable("Chest", 100)
+            if not S.chest then
+                S.tpRawGoldToChest = false
+                Library:Notify('No chest found!')
+                return
+            end
+            Tasks.tpRawGold = task.spawn(tpRawGoldLoop)
+        else
+            if Tasks.tpRawGold then task.cancel(Tasks.tpRawGold) end
+        end
+    end
+})
+
+ExtrasBox:AddToggle('PickupGoldFromChest', {
+    Text = 'Pickup Gold from Chest',
+    Default = false,
+    Callback = function(v)
+        S.pickupGoldFromChest = v
+        if v then
+            S.chest = getDeployable("Chest", 100)
+            if not S.chest then
+                S.pickupGoldFromChest = false
+                Library:Notify('No chest found!')
+                return
+            end
+            Tasks.pickupGoldFromChest = task.spawn(pickupGoldFromChestLoop)
+        else
+            if Tasks.pickupGoldFromChest then task.cancel(Tasks.pickupGoldFromChest) end
+        end
+    end
+})
+
+-- Performance Tab
+local PerfBox = Tabs.Performance:AddLeftGroupbox('Performance Boost')
+
+PerfBox:AddLabel('Black Screen Mode')
+
+PerfBox:AddToggle('BlackScreen', {
+    Text = 'Enable Black Screen',
+    Default = false,
+    Tooltip = 'Covers screen with black overlay and disables lighting for maximum FPS',
+    Callback = function(v)
+        S.blackScreen = v
+        if v then
+            enableBlackScreen()
+            Library:Notify('Black Screen Optimization Enabled! FPS Boost Active')
+        else
+            disableBlackScreen()
+            Library:Notify('Black Screen Optimization Disabled')
+        end
+    end
+})
+
+PerfBox:AddDivider()
+
+PerfBox:AddLabel('Benefits:')
+PerfBox:AddLabel('• Massive FPS increase')
+PerfBox:AddLabel('• Reduced GPU usage')
+PerfBox:AddLabel('• Lower CPU overhead')
+PerfBox:AddLabel('• Disabled lighting effects')
+
+local PerfBox2 = Tabs.Performance:AddRightGroupbox('Graphics Settings')
+
+PerfBox2:AddButton('Set Graphics to Minimum', function()
+    settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+    Library:Notify('Graphics set to minimum!')
+end)
+
+PerfBox2:AddButton('Disable All Effects', function()
+    for _, effect in pairs(Lighting:GetChildren()) do
+        if effect:IsA("PostEffect") then
+            effect.Enabled = false
+        end
+    end
+    Library:Notify('All visual effects disabled!')
+end)
+
+PerfBox2:AddDivider()
+
+PerfBox2:AddLabel('Additional Optimizations:')
+PerfBox2:AddLabel('• Lower graphics quality')
+PerfBox2:AddLabel('• Disable post-processing')
+PerfBox2:AddLabel('• Reduce particle effects')
+
+-- UI Settings
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+ThemeManager:SetFolder('GoldFarmHub')
+SaveManager:SetFolder('GoldFarmHub/configs')
+SaveManager:BuildConfigSection(Tabs['UI Settings'])
+ThemeManager:ApplyToTab(Tabs['UI Settings'])
+
+Library:OnUnload(function()
+    Library.Unloaded = true
+    if S.blackScreen then
+        disableBlackScreen()
+    end
+    if activeTween then
+        activeTween:Cancel()
     end
 end)
 
-UIS.InputChanged:Connect(function(input)
-    if input == dragInput and dragging then
-        update(input)
+Library:Notify('Gold Farm Hub loaded!')
+print("=== Gold Farm Loaded ===\nPositions: Loading...\nFruit: " .. S.fruit .. "\nTween Speed: " .. S.tweenSpeed .. "\nWait Time: " .. S.waitTime)
+
+task.spawn(function()
+    task.wait(2)
+    if config.positions then
+        S.positions = config.positions
+        print("Positions loaded: " .. #S.positions)
     end
 end)
-
-print("✨ Gold Farm loaded successfully!")
