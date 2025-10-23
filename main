@@ -59,8 +59,8 @@ local S = {
     fruit = "Lemon",
     hitRadius = 200,
     waitTime = 0.01,
-    positions = {},
-    tweenSpeed = 19.6,
+    positionList = {},
+    tweenSpeed = 16,
     isMoving = false,
     lastEatTime = 0,
     chest = nil
@@ -409,126 +409,56 @@ local tween = nil
 local tweenConn = nil
 
 local function startTweening()
-    if #S.positions == 0 then
+    if #S.positionList == 0 then
         Library:Notify('No positions available')
         return
     end
 
-    -- More aggressive detection thresholds
-    local REACH_RADIUS = 5
-    local MIN_IMPROVE_STUDS = 0.5
-    local NO_PROGRESS_SECS = 2.0
-    local TELEPORT_BACK_DINC = 6
-    local TELEPORT_STEP_JUMP = 12
-    local RUBBER_DEV_STUDS = 5
-    local SETTLE_SECS = 0.6
-    local MAX_RB_PER_NODE = 2
-    local JUMP_SAMPLE_SECS = 0.15
-    local SKIP_POSITION_THRESHOLD = 5
-    
-    local skippedPositions = {}
-    
-    -- Simplified collision detection
-    local function isPositionSafe(position)
-        -- Only check if we're literally inside a solid object
-        local parts = workspace:GetPartBoundsInBox(
-            CFrame.new(position),
-            Vector3.new(3, 5, 3)
-        )
-        
-        for _, part in ipairs(parts) do
-            if part ~= Root and part.CanCollide and not part:IsDescendantOf(Character) then
-                -- Check if it's a resource node
-                if part.Parent and part.Parent:IsA("Model") then
-                    local parent = part.Parent
-                    if parent.Parent == Cache.Resources then
-                        -- Only block if we're definitely inside the node
-                        local distance = (position - part.Position).Magnitude
-                        if distance < 2 then
-                            return false, "Inside resource"
-                        end
-                    end
-                end
-            end
-        end
-        
-        return true
-    end
+    local REACH_RADIUS = 4
+    local MIN_IMPROVE_STUDS = 0.75
+    local NO_PROGRESS_SECS = 2.5
+    local TELEPORT_BACK_DINC = 8
+    local TELEPORT_STEP_JUMP = 15
+    local RUBBER_DEV_STUDS = 6
+    local SETTLE_SECS = 0.40
+    local MAX_RB_PER_NODE = 3
+    local JUMP_SAMPLE_SECS = 0.20
 
     local function nearestIndex(fromPos)
         local bestI, bestD = 1, math.huge
-        for j = 1, #S.positions do
-            if not skippedPositions[j] then
-                local p = S.positions[j]
-                if p and p.X and p.Y and p.Z then
-                    local targetPos = Vector3.new(p.X, p.Y, p.Z)
-                    local d = (fromPos - targetPos).Magnitude
-                    
-                    if d < bestD then
-                        bestI, bestD = j, d
-                    end
-                end
+        for j = 1, #S.positionList do
+            local p = S.positionList[j]
+            if p and p.X and p.Y and p.Z then
+                local d = (fromPos - Vector3.new(p.X, p.Y, p.Z)).Magnitude
+                if d < bestD then bestI, bestD = j, d end
             end
         end
         return bestI
     end
-    
-    local function findNextValidIndex(currentIdx)
-        for i = 1, #S.positions do
-            local nextIdx = ((currentIdx + i - 1) % #S.positions) + 1
-            if not skippedPositions[nextIdx] then
-                return nextIdx
-            end
-        end
-        -- If all positions are skipped, reset and start over
-        skippedPositions = {}
-        return 1
-    end
 
     local curIndex = nearestIndex(Root.Position)
-    local fails = {}
-    local rbCount = {}
-    local consecutiveRB = 0
-    local collisionSkips = {}
+    local fails = table.create(#S.positionList, 0)
+    local rbCount = table.create(#S.positionList, 0)
 
     while S.tween and S.isMoving do
-        if curIndex < 1 or curIndex > #S.positions then
+        if curIndex < 1 or curIndex > #S.positionList then
             curIndex = 1
         end
-        
-        -- Skip if this position is marked as problematic
-        if skippedPositions[curIndex] then
-            curIndex = findNextValidIndex(curIndex)
-            task.wait(0.05)
-            continue
-        end
 
-        local pos = S.positions[curIndex]
+        local pos = S.positionList[curIndex]
         if not (pos and pos.X and pos.Y and pos.Z) then
-            curIndex = findNextValidIndex(curIndex)
+            Library:Notify(("Invalid pos @ %d"):format(curIndex))
+            curIndex = (curIndex % #S.positionList) + 1
             task.wait(0.05)
             continue
         end
 
         local targetPos = Vector3.new(pos.X, pos.Y, pos.Z)
         local startPos = Root.Position
-        
-        -- Only check if target position is extremely unsafe (literally inside something)
-        local isSafe, safetyReason = isPositionSafe(targetPos)
-        if not isSafe then
-            collisionSkips[curIndex] = (collisionSkips[curIndex] or 0) + 1
-            if collisionSkips[curIndex] >= 5 then
-                skippedPositions[curIndex] = true
-                Library:Notify(string.format('Skipping unsafe position #%d (%s)', curIndex, safetyReason))
-            end
-            curIndex = findNextValidIndex(curIndex)
-            task.wait(0.05)
-            continue
-        end
-        
         local dist = (startPos - targetPos).Magnitude
-        local MAX_TRAVEL_SECS = math.max(12, dist / (S.tweenSpeed * 0.7))
-        local duration = math.max(0.02, dist / S.tweenSpeed)
+        local speed = S.tweenSpeed
+        local MAX_TRAVEL_SECS = math.max(15, dist / (speed * 0.6))
+        local duration = math.max(0.02, dist / speed)
 
         if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
         if tween then tween:Cancel(); tween = nil end
@@ -550,9 +480,6 @@ local function startTweening()
         end)
 
         tween:Play()
-        
-        -- Keep collision enabled but don't over-restrict
-        Root.CanCollide = false
 
         while S.tween and S.isMoving and not completed do
             task.wait(JUMP_SAMPLE_SECS)
@@ -561,58 +488,30 @@ local function startTweening()
             local elapsed = now - t0
             local alpha = math.clamp(elapsed / duration, 0, 1)
 
-            local curPos = Root.Position
+            local curPos  = Root.Position
             local curDist = (curPos - targetPos).Magnitude
 
             if curDist <= REACH_RADIUS then
                 completed = true
                 break
             end
-            
-            -- Only check for stuck if we've been moving for a bit
-            if elapsed > 1.0 then
-                local velocity = Root.AssemblyLinearVelocity.Magnitude
-                if velocity < 0.3 then
-                    -- We might be stuck, check if there's something solid nearby
-                    local nearbyParts = workspace:GetPartBoundsInBox(
-                        CFrame.new(curPos),
-                        Vector3.new(4, 4, 4)
-                    )
-                    for _, part in ipairs(nearbyParts) do
-                        if part ~= Root and part.CanCollide and not part:IsDescendantOf(Character) then
-                            if part.Parent and part.Parent:IsA("Model") then
-                                if part.Parent.Parent == Cache.Resources then
-                                    rubberbanded = true
-                                    break
-                                end
-                            end
-                        end
+
+            local stepJump = (curPos - lastPos).Magnitude
+            if (curDist - lastDist) >= TELEPORT_BACK_DINC or stepJump >= TELEPORT_STEP_JUMP then
+                rubberbanded = true
+            end
+
+            do
+                local expectPos = startPos:Lerp(targetPos, alpha)
+                local dev = (curPos - expectPos).Magnitude
+                if dev >= RUBBER_DEV_STUDS then
+                    local vmag = Root.AssemblyLinearVelocity.Magnitude
+                    if vmag < 1 or dev > (RUBBER_DEV_STUDS * 1.5) then
+                        rubberbanded = true
                     end
                 end
             end
 
-            local stepJump = (curPos - lastPos).Magnitude
-            
-            -- More sensitive detection
-            if (curDist - lastDist) >= TELEPORT_BACK_DINC then
-                rubberbanded = true
-            end
-            
-            if stepJump >= TELEPORT_STEP_JUMP and elapsed > 0.3 then
-                rubberbanded = true
-            end
-
-            -- Check expected vs actual position
-            local expectPos = startPos:Lerp(targetPos, alpha)
-            local dev = (curPos - expectPos).Magnitude
-            if dev >= RUBBER_DEV_STUDS and elapsed > 0.5 then
-                local vmag = Root.AssemblyLinearVelocity.Magnitude
-                if vmag < 2 then
-                    rubberbanded = true
-                end
-            end
-
-            -- Timeout check
             if (now - t0) > MAX_TRAVEL_SECS or 
                ((now - lastPoll) > NO_PROGRESS_SECS and (lastDist - curDist) < MIN_IMPROVE_STUDS) then
                 restartToNext = true
@@ -623,26 +522,16 @@ local function startTweening()
                 if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
                 if tween then tween:Cancel(); tween = nil end
 
-                consecutiveRB = consecutiveRB + 1
                 task.wait(SETTLE_SECS)
-                
                 local serverPos = Root.Position
-                local distFromTarget = (serverPos - targetPos).Magnitude
-                
+                local newIndex  = nearestIndex(serverPos)
+
                 rbCount[curIndex] = (rbCount[curIndex] or 0) + 1
-                
-                -- Mark position as problematic if it fails too many times
-                if rbCount[curIndex] >= SKIP_POSITION_THRESHOLD then
-                    skippedPositions[curIndex] = true
-                    Library:Notify(string.format('Skipping problematic position #%d', curIndex))
-                    curIndex = findNextValidIndex(curIndex)
+                if rbCount[curIndex] >= MAX_RB_PER_NODE then
                     rbCount[curIndex] = 0
-                elseif rbCount[curIndex] >= MAX_RB_PER_NODE then
-                    -- Try next position
-                    curIndex = findNextValidIndex(curIndex)
-                elseif distFromTarget > dist * 0.7 then
-                    -- We got sent way back, find nearest
-                    curIndex = nearestIndex(serverPos)
+                    curIndex = (curIndex % #S.positionList) + 1
+                else
+                    curIndex = newIndex
                 end
 
                 Root.Anchored = false
@@ -659,34 +548,23 @@ local function startTweening()
         if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
         if tween then tween:Cancel(); tween = nil end
 
-        if jumpOuter then 
-            task.wait(0.1)
-            continue 
-        end
+        if jumpOuter then continue end
 
         if restartToNext then
             fails[curIndex] = (fails[curIndex] or 0) + 1
-            if fails[curIndex] >= SKIP_POSITION_THRESHOLD then
-                skippedPositions[curIndex] = true
-                Library:Notify(string.format('Skipping stuck position #%d', curIndex))
+            if fails[curIndex] >= 3 then
+                fails[curIndex] = 0
             end
-            curIndex = findNextValidIndex(curIndex)
+            curIndex = (curIndex % #S.positionList) + 1
             Root.Anchored = false
             task.wait(0.15)
             continue
         end
 
-        -- Successfully reached position
         fails[curIndex] = 0
         rbCount[curIndex] = 0
-        collisionSkips[curIndex] = 0
-        consecutiveRB = 0
-        curIndex = findNextValidIndex(curIndex)
-        
-        task.wait(S.waitTime)
+        curIndex = (curIndex % #S.positionList) + 1
     end
-    
-    Root.CanCollide = false
     task.wait(0.02)
     if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
     if tween then tween:Cancel(); tween = nil end
@@ -773,7 +651,7 @@ TweenBox:AddToggle('Tween', {
         if v then
             task.wait(0.5)
             if config.positions then
-                S.positions = config.positions
+                S.positionList = config.positions
             end
             Tasks.tween = task.spawn(startTweening)
         else
@@ -786,7 +664,7 @@ TweenBox:AddToggle('Tween', {
 
 TweenBox:AddSlider('Speed', {
     Text = 'Tween Speed',
-    Default = 20,
+    Default = 19.6,
     Min = 5,
     Max = 50,
     Rounding = 1,
@@ -808,15 +686,15 @@ TweenBox:AddSlider('WaitTime', {
     end
 })
 
-TweenBox:AddLabel('Anti-Rubberband: COLLISION AVOIDANCE')
-TweenBox:AddLabel('Strict pathing - avoids models & terrain')
+TweenBox:AddLabel('Anti-Rubberband System')
+TweenBox:AddLabel('Detects server corrections & adjusts path')
 TweenBox:AddLabel('Positions: Loading...')
 
 task.spawn(function()
     task.wait(1)
     if config.positions then
-        S.positions = config.positions
-        TweenBox:AddLabel('Positions: ' .. #S.positions)
+        S.positionList = config.positions
+        TweenBox:AddLabel('Positions: ' .. #S.positionList)
     end
 end)
 
@@ -964,6 +842,6 @@ Library:Notify('Gold Farm Hub loaded!')
 task.spawn(function()
     task.wait(2)
     if config.positions then
-        S.positions = config.positions
+        S.positionList = config.positions
     end
 end)
