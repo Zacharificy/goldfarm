@@ -36,11 +36,20 @@ Player.CharacterAdded:Connect(function(char)
 end)
 
 local config = {waitTime = 0.01, positions = {}}
+local config2 = {waitTime = 0.01, positions = {}}
+
 task.spawn(function()
     local success, result = pcall(function()
         return loadstring(game:HttpGet("https://raw.githubusercontent.com/Zacharificy/goldfarm/main/tweens"))()
     end)
     if success and result then config = result end
+end)
+
+task.spawn(function()
+    local success, result = pcall(function()
+        return loadstring(game:HttpGet("https://raw.githubusercontent.com/Zacharificy/goldfarm/main/tweens2"))()
+    end)
+    if success and result then config2 = result end
 end)
 
 local S = {
@@ -63,12 +72,28 @@ local S = {
     tweenSpeed = 16,
     isMoving = false,
     lastEatTime = 0,
-    chest = nil
+    chest = nil,
+    CampfireTracker = {},
+    autoRetoolEnabled = false,
+    retoolChoice = "God Pick",
+    retoolThread = nil,
+    hideItems = false,
+    hiddenItems = {},
+    selectedPath = "Path 1"
 }
 
 local HUNGER_CAP = 100
 local EAT_AT = 90
 local EAT_COOLDOWN = 1.5
+
+local CFG = {
+    GOLD_ID = 597,
+    CRYSTAL_ID = 436,
+    GOD_AXE_ID = 454,
+    GOD_PICK_ID = 132,
+    NEED_GOLD = 12,
+    NEED_CRYSTAL = 3
+}
 
 local Connections = {}
 local Tasks = {}
@@ -85,6 +110,141 @@ task.spawn(function()
     end
     table.sort(fruitOptions)
 end)
+
+local function chosenName() 
+    return (S.retoolChoice == "God Axe") and "God Axe" or "God Pick" 
+end
+
+local function chosenCraftID() 
+    return (S.retoolChoice == "God Axe") and CFG.GOD_AXE_ID or CFG.GOD_PICK_ID 
+end
+
+local function getToolbar() 
+    return (GameUtil and GameUtil.Data and GameUtil.Data.toolbar) or {} 
+end
+
+local function getEquipped() 
+    return GameUtil and GameUtil.Data and GameUtil.Data.equipped 
+end
+
+local function toolbarFindChosenSlot()
+    for slot, entry in pairs(getToolbar()) do
+        local name = entry and (entry.name or (entry.itemID and idToName(entry.itemID)))
+        if name == chosenName() then return slot end
+    end
+    return nil
+end
+
+local function equippedIsChosen()
+    local eq = getEquipped()
+    if type(eq) == "number" then
+        local e = getToolbar()[eq]
+        local nm = e and (e.name or (e.itemID and idToName(e.itemID)))
+        return nm == chosenName()
+    elseif type(eq) == "string" then
+        return eq == chosenName()
+    elseif type(eq) == "table" then
+        local nm = eq.name or (eq.itemID and idToName(eq.itemID))
+        return nm == chosenName()
+    end
+    return false
+end
+
+local function ensureMaterials()
+    local g = tonumber((getQuantity("Gold"))) or 0
+    local c = tonumber((getQuantity("Crystal Chunk"))) or 0
+
+    local needGold = math.max(0, CFG.NEED_GOLD - g)
+    local needCrystal = math.max(0, CFG.NEED_CRYSTAL - c)
+
+    for i = 1, needGold do
+        Packets.PurchaseFromShop.send(CFG.GOLD_ID)
+        task.wait()
+    end
+
+    for i = 1, needCrystal do
+        Packets.PurchaseFromShop.send(CFG.CRYSTAL_ID)
+        task.wait()
+    end
+end
+
+local function craftAndEquipFromHotbar()
+    ensureMaterials()
+
+    Packets.CraftItem.send(chosenCraftID())
+    task.wait(0.5)
+
+    local t0 = os.clock()
+    local slot
+    repeat
+        slot = toolbarFindChosenSlot()
+        if slot then break end
+        task.wait(0.1)
+    until os.clock() - t0 > 3
+
+    if not slot then
+        task.wait(0.3)
+        slot = toolbarFindChosenSlot()
+    end
+
+    if slot then
+        Packets.EquipTool.send(slot)
+        return true
+    else
+        Library:Notify('Crafted, but tool not found in hotbar.')
+        return false
+    end
+end
+
+local function autoRetoolLoop()
+    while S.autoRetoolEnabled do
+        if not equippedIsChosen() then
+            local slot = toolbarFindChosenSlot()
+            if slot then
+                Packets.EquipTool.send(slot)
+            else
+                craftAndEquipFromHotbar()
+            end
+        end
+        task.wait(0.5)
+    end
+end
+
+local function hideItemsOnFloor()
+    if not Cache.Items then return end
+    
+    for _, item in ipairs(Cache.Items:GetChildren()) do
+        if not S.hiddenItems[item] then
+            S.hiddenItems[item] = true
+            for _, part in ipairs(item:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.Transparency = 1
+                    part.CanCollide = false
+                elseif part:IsA("Decal") or part:IsA("Texture") then
+                    part.Transparency = 1
+                end
+            end
+        end
+    end
+end
+
+local function showItemsOnFloor()
+    if not Cache.Items then return end
+    
+    for item in pairs(S.hiddenItems) do
+        if item and item.Parent then
+            for _, part in ipairs(item:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.Transparency = 0
+                    part.CanCollide = true
+                elseif part:IsA("Decal") or part:IsA("Texture") then
+                    part.Transparency = 0
+                end
+            end
+        end
+    end
+    table.clear(S.hiddenItems)
+end
 
 local function setupAntiAFK()
     local GC = getconnections or get_signal_cons
@@ -184,8 +344,8 @@ local function createPickup(itemName, checkChests, stateKey)
                         local id = item:GetAttribute("EntityID")
                         if id then
                             cache[item] = true
-                            for i = 1, 3 do Packets.Pickup.send(id) end
-                            task.delay(0.5, function() cache[item] = nil end)
+                            for i = 1, 10 do Packets.Pickup.send(id) end
+                            task.delay(0.3, function() cache[item] = nil end)
                         end
                     end
                 end
@@ -200,8 +360,8 @@ local function createPickup(itemName, checkChests, stateKey)
                                 local id = item:GetAttribute("EntityID")
                                 if id then
                                     cache[item] = true
-                                    for i = 1, 3 do Packets.Pickup.send(id) end
-                                    task.delay(0.5, function() cache[item] = nil end)
+                                    for i = 1, 10 do Packets.Pickup.send(id) end
+                                    task.delay(0.3, function() cache[item] = nil end)
                                 end
                             end
                         end
@@ -237,6 +397,34 @@ local function getDeployable(name, range)
     return closest
 end
 
+local function GetDeployable(name, range, multiple)
+    local deployablesFolder = Cache.Deployables
+    if not deployablesFolder or not Root then
+        return multiple and {} or nil
+    end
+
+    range = tonumber(range) or math.huge
+
+    if multiple then
+        local results = {}
+        for _, v in ipairs(deployablesFolder:GetChildren()) do
+            if v.Name == name and v:IsA("Model") then
+                local ok, pivot = pcall(function() return v:GetPivot() end)
+                if ok and pivot then
+                    local dist = (Root.Position - pivot.Position).Magnitude
+                    if dist < range then
+                        table.insert(results, { deployable = v, range = dist })
+                    end
+                end
+            end
+        end
+        table.sort(results, function(a, b) return a.range < b.range end)
+        return results
+    else
+        return getDeployable(name, range)
+    end
+end
+
 local function getQuantity(name)
     for _, v in next, GameUtil.getData().inventory do
         if v.name == name then return v.quantity end
@@ -244,79 +432,182 @@ local function getQuantity(name)
     return 0
 end
 
+local SEND_DT = 0.01
+local LOOKUP_DT = 2
+local BURST_MAX = 10
+
 local function pressCoins()
-    local press, entityID = nil, nil
+    local press, entityID, lastLookup, lastSend = nil, nil, 0, 0
+
     while S.coinPress do
-        if not press or not press.Parent then
+        local now = os.clock()
+
+        if (not press or not press.Parent or (now - lastLookup) >= LOOKUP_DT) then
             press = getDeployable("Coin Press", 25)
-            entityID = press and press:GetAttribute("EntityID")
-            if not entityID then task.wait(0.5) continue end
+            entityID = (press and press:GetAttribute("EntityID")) or nil
+            lastLookup = now
         end
-        
-        local goldAmt = getQuantity("Gold")
-        if goldAmt > 0 then
-            local batch = math.min(goldAmt, 25)
-            for i = 1, batch do
-                Packets.InteractStructure.send({ entityID = entityID, itemID = ItemIDS.Gold })
+
+        if entityID then
+            local goldAmt = getQuantity("Gold") or 0
+            if goldAmt > 0 and (now - lastSend) >= SEND_DT then
+                local n = math.min(goldAmt, BURST_MAX)
+                for i = 1, n do
+                    Packets.InteractStructure.send({ entityID = entityID, itemID = ItemIDS.Gold })
+                end
+                lastSend = now
             end
         end
+
         RunService.Heartbeat:Wait()
     end
 end
 
+local function getCampfireCapacity(campfireName)
+    local data = ItemData[campfireName]
+    return data and data.capacity or 100
+end
+
+local function getFuelBurnValue(fuelName)
+    local data = ItemData[fuelName]
+    return data and data.fuelValue or 60
+end
+
+local function shouldRefuelCampfire(campfire, currentTime)
+    local tracked = S.CampfireTracker[campfire]
+    if not tracked then
+        return true
+    end
+    
+    local elapsed = currentTime - tracked.lastFuelTime
+    local remaining = math.max(0, tracked.fuelAmount - elapsed)
+    
+    return remaining <= 10
+end
+
+local function trackCampfireFuel(campfire, fuelName)
+    local currentTime = tick()
+    local fuelValue = getFuelBurnValue(fuelName)
+    local capacity = getCampfireCapacity(campfire.Name)
+    
+    if not S.CampfireTracker[campfire] then
+        S.CampfireTracker[campfire] = {
+            lastFuelTime = currentTime,
+            fuelAmount = fuelValue
+        }
+    else
+        local tracked = S.CampfireTracker[campfire]
+        local elapsed = currentTime - tracked.lastFuelTime
+        local currentFuel = math.max(0, tracked.fuelAmount - elapsed)
+        
+        tracked.fuelAmount = math.min(currentFuel + fuelValue, capacity)
+        tracked.lastFuelTime = currentTime
+    end
+end
+
+local function idToName(id)
+    for name, data in pairs(ItemData) do
+        if type(data) == "table" and (data.id == id or data.itemID == id) then return name end
+    end
+    for name, _id in pairs(ItemIDS) do
+        if _id == id then return name end
+    end
+    return nil
+end
+
+local function GetFuel()
+    for x, v in next, GameUtil.getData().inventory do
+        if ItemData[v.name] and ItemData[v.name]["fuels"] then
+            return ItemIDS[v.name]
+        end
+    end
+    return nil
+end
+
 local function campfireRefuel()
+    local CHECK_INTERVAL = 1
+    local REFUEL_THRESHOLD = 10
+    
     while S.campfireFuel do
-        if Cache.Deployables and Root then
-            local rootPos = Root.Position
-            for _, structure in ipairs(Cache.Deployables:GetChildren()) do
-                if structure.Name == "Campfire" and (structure:GetPivot().Position - rootPos).Magnitude <= 40 then
-                    local entityID = structure:GetAttribute("EntityID")
-                    local textLabel = structure:FindFirstChild("Board", true) and 
-                                    structure.Board:FindFirstChild("Billboard", true) and 
-                                    structure.Board.Billboard:FindFirstChild("Backdrop", true) and 
-                                    structure.Board.Billboard.Backdrop:FindFirstChild("TextLabel")
-                    
-                    if entityID and textLabel then
-                        local fireValue = tonumber(textLabel.Text) or 999
-                        if fireValue <= 200 then
-                            for i = 1, math.min(10, math.floor((250 - fireValue) / 50)) do
-                                Packets.InteractStructure.send({ entityID = entityID, itemID = ItemIDS.Coal })
-                            end
+        task.wait(CHECK_INTERVAL)
+        
+        local currentTime = tick()
+        local campfires = GetDeployable("Campfire", 40, true) or {}
+        
+        for trackedCampfire in pairs(S.CampfireTracker) do
+            if not trackedCampfire.Parent then
+                S.CampfireTracker[trackedCampfire] = nil
+            end
+        end
+        
+        for _, rec in ipairs(campfires) do
+            local campfire = rec.deployable
+            
+            local tracked = S.CampfireTracker[campfire]
+            local remainingFuel = 0
+            
+            if tracked then
+                local elapsed = currentTime - tracked.lastFuelTime
+                remainingFuel = math.max(0, tracked.fuelAmount - elapsed)
+            end
+            
+            if remainingFuel <= REFUEL_THRESHOLD then
+                local fuel = GetFuel()
+                if fuel then
+                    local entityID = campfire:GetAttribute("EntityID")
+                    if entityID then
+                        local fuelName = idToName(fuel)
+                        if not fuelName then continue end
+                        
+                        local fuelValue = getFuelBurnValue(fuelName)
+                        
+                        for i = 1, 2 do
+                            Packets.InteractStructure.send({
+                                entityID = entityID,
+                                itemID = fuel
+                            })
+                            task.wait(0.05)
                         end
+                        
+                        S.CampfireTracker[campfire] = {
+                            lastFuelTime = currentTime,
+                            fuelAmount = fuelValue * 2
+                        }
+                        
+                        task.wait(0.2)
                     end
                 end
             end
         end
-        task.wait(0.25)
     end
+    
+    table.clear(S.CampfireTracker)
 end
 
 local function tpRawGold()
-    local chestPos = nil
     while S.tpRawGoldToChest do
         if not S.chest or not S.chest.Parent then
             S.chest = getDeployable("Chest", 100)
-            if not S.chest then task.wait(0.5) continue end
-            chestPos = S.chest:GetPivot()
+            if not S.chest then task.wait(0.3) continue end
         end
         
         local inventory = GameUtil.getData().inventory
         for idx, data in pairs(inventory) do
             if data.name == "Raw Gold" and data.quantity > 0 then
-                local dropAmount = math.min(data.quantity, 50)
+                local dropAmount = math.min(data.quantity, 100)
                 for i = 1, dropAmount do
                     Packets.DropBagItem.send(idx, 1)
                 end
                 
-                task.wait(0.05)
+                task.wait(0.02)
                 
                 if Cache.Items then
                     for _, item in ipairs(Cache.Items:GetChildren()) do
                         if item.Name == "Raw Gold" then
                             local id = item:GetAttribute("EntityID")
-                            if id then
+                            if id and S.chest and S.chest.Parent then
                                 Packets.ForceInteract.send(id)
-                                pcall(item.PivotTo, item, chestPos * CFrame.new(0, 2, 0))
+                                pcall(item.PivotTo, item, S.chest:GetPivot() * CFrame.new(0, 2, 0))
                                 Packets.ForceInteract.send()
                             end
                         end
@@ -333,7 +624,7 @@ local function pickupGoldFromChest()
     while S.pickupGoldFromChest do
         if not S.chest or not S.chest.Parent then
             S.chest = getDeployable("Chest", 100)
-            if not S.chest then task.wait(1) continue end
+            if not S.chest then task.wait(0.5) continue end
         end
         
         local contents = S.chest:FindFirstChild("Contents")
@@ -342,7 +633,7 @@ local function pickupGoldFromChest()
                 if item.Name == "Gold" then
                     local id = item:GetAttribute("EntityID")
                     if id then
-                        for i = 1, 5 do Packets.Pickup.send(id) end
+                        for i = 1, 10 do Packets.Pickup.send(id) end
                     end
                 end
             end
@@ -414,15 +705,15 @@ local function startTweening()
         return
     end
 
-    local REACH_RADIUS = 4
-    local MIN_IMPROVE_STUDS = 0.75
-    local NO_PROGRESS_SECS = 2.5
-    local TELEPORT_BACK_DINC = 8
-    local TELEPORT_STEP_JUMP = 15
-    local RUBBER_DEV_STUDS = 6
-    local SETTLE_SECS = 0.40
-    local MAX_RB_PER_NODE = 3
-    local JUMP_SAMPLE_SECS = 0.20
+    local REACH_RADIUS = 5
+    local MIN_IMPROVE_STUDS = 0.5
+    local NO_PROGRESS_SECS = 3
+    local TELEPORT_BACK_DINC = 12
+    local TELEPORT_STEP_JUMP = 20
+    local RUBBER_DEV_STUDS = 8
+    local SETTLE_SECS = 0.5
+    local MAX_RB_PER_NODE = 4
+    local JUMP_SAMPLE_SECS = 0.15
 
     local function nearestIndex(fromPos)
         local bestI, bestD = 1, math.huge
@@ -457,93 +748,8 @@ local function startTweening()
         local startPos = Root.Position
         local dist = (startPos - targetPos).Magnitude
         local speed = S.tweenSpeed
-        local MAX_TRAVEL_SECS = math.max(15, dist / (speed * 0.6))
-        local duration = math.max(0.02, dist / speed)
-
-        if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
-        if tween then tween:Cancel(); tween = nil end
-
-        local ti = TweenInfo.new(duration, Enum.EasingStyle.Linear)
-        tween = TweenService:Create(Root, ti, { CFrame = CFrame.new(targetPos) })
-
-        local completed, restartToNext, rubberbanded = false, false, false
-        local jumpOuter = false
-
-        local t0 = tick()
-        local lastPoll = t0
-        local lastPos = startPos
-        local lastDist = (lastPos - targetPos).Magnitude
-
-        tweenConn = tween.Completed:Connect(function()
-            completed = true
-            if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
-        end)
-
-        tween:Play()
-
-        while S.tween and S.isMoving and not completed do
-            task.wait(JUMP_SAMPLE_SECS)
-
-            local now = tick()
-            local elapsed = now - t0
-            local alpha = math.clamp(elapsed / duration, 0, 1)
-
-            local curPos  = Root.Position
-            local curDist = (curPos - targetPos).Magnitude
-
-            if curDist <= REACH_RADIUS then
-                completed = true
-                break
-            end
-
-            local stepJump = (curPos - lastPos).Magnitude
-            if (curDist - lastDist) >= TELEPORT_BACK_DINC or stepJump >= TELEPORT_STEP_JUMP then
-                rubberbanded = true
-            end
-
-            do
-                local expectPos = startPos:Lerp(targetPos, alpha)
-                local dev = (curPos - expectPos).Magnitude
-                if dev >= RUBBER_DEV_STUDS then
-                    local vmag = Root.AssemblyLinearVelocity.Magnitude
-                    if vmag < 1 or dev > (RUBBER_DEV_STUDS * 1.5) then
-                        rubberbanded = true
-                    end
-                end
-            end
-
-            if (now - t0) > MAX_TRAVEL_SECS or 
-               ((now - lastPoll) > NO_PROGRESS_SECS and (lastDist - curDist) < MIN_IMPROVE_STUDS) then
-                restartToNext = true
-                break
-            end
-
-            if rubberbanded then
-                if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
-                if tween then tween:Cancel(); tween = nil end
-
-                task.wait(SETTLE_SECS)
-                local serverPos = Root.Position
-                local newIndex  = nearestIndex(serverPos)
-
-                rbCount[curIndex] = (rbCount[curIndex] or 0) + 1
-                if rbCount[curIndex] >= MAX_RB_PER_NODE then
-                    rbCount[curIndex] = 0
-                    curIndex = (curIndex % #S.positionList) + 1
-                else
-                    curIndex = newIndex
-                end
-
-                Root.Anchored = false
-                task.wait(0.1)
-                jumpOuter = true
-                break
-            end
-
-            lastPoll = now
-            lastDist = curDist
-            lastPos = curPos
-        end
+        local MAX_TRAVEL_SECS = math.max(20, dist / (speed * 0.5))
+        local duration = math.max(0.1, dist / speed)
 
         if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
         if tween then tween:Cancel(); tween = nil end
@@ -556,7 +762,6 @@ local function startTweening()
                 fails[curIndex] = 0
             end
             curIndex = (curIndex % #S.positionList) + 1
-            Root.Anchored = false
             task.wait(0.15)
             continue
         end
@@ -564,7 +769,10 @@ local function startTweening()
         fails[curIndex] = 0
         rbCount[curIndex] = 0
         curIndex = (curIndex % #S.positionList) + 1
+        
+        task.wait(0.05)
     end
+    
     task.wait(0.02)
     if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
     if tween then tween:Cancel(); tween = nil end
@@ -642,6 +850,25 @@ MainBox:AddToggle('AutoEat', {
 
 local TweenBox = Tabs.Main:AddRightGroupbox('Tweening')
 
+TweenBox:AddLabel('YAKK TWEEN STARTS AT MID')
+TweenBox:AddDivider()
+
+TweenBox:AddDropdown('PathSelect', {
+    Values = { "Path 1", "Draksies" },
+    Default = 1,
+    Multi = false,
+    Text = 'Select Path',
+    Callback = function(v) 
+        S.selectedPath = v
+        if v == "Path 1" then
+            S.positionList = config.positions or {}
+        else
+            S.positionList = config2.positions or {}
+        end
+        Library:Notify('Switched to ' .. v)
+    end
+})
+
 TweenBox:AddToggle('Tween', {
     Text = 'Enable Tween',
     Default = false,
@@ -650,8 +877,10 @@ TweenBox:AddToggle('Tween', {
         S.isMoving = v
         if v then
             task.wait(0.5)
-            if config.positions then
-                S.positionList = config.positions
+            if S.selectedPath == "Path 1" then
+                S.positionList = config.positions or {}
+            else
+                S.positionList = config2.positions or {}
             end
             Tasks.tween = task.spawn(startTweening)
         else
@@ -673,30 +902,6 @@ TweenBox:AddSlider('Speed', {
         S.tweenSpeed = v
     end
 })
-
-TweenBox:AddSlider('WaitTime', {
-    Text = 'Wait Time (s)',
-    Default = 0.01,
-    Min = 0,
-    Max = 5,
-    Rounding = 2,
-    Compact = false,
-    Callback = function(v)
-        S.waitTime = v
-    end
-})
-
-TweenBox:AddLabel('Anti-Rubberband System')
-TweenBox:AddLabel('Detects server corrections & adjusts path')
-TweenBox:AddLabel('Positions: Loading...')
-
-task.spawn(function()
-    task.wait(1)
-    if config.positions then
-        S.positionList = config.positions
-        TweenBox:AddLabel('Positions: ' .. #S.positionList)
-    end
-end)
 
 local PickupBox = Tabs.Main:AddLeftGroupbox('Instant Pickup')
 
@@ -733,8 +938,9 @@ PickupBox:AddToggle('PickupCoins', {
 local ExtrasBox = Tabs.Extras:AddLeftGroupbox('Extras')
 
 ExtrasBox:AddToggle('CoinPress', {
-    Text = 'Auto Coin Press',
+    Text = 'Auto Coin Press (Fast)',
     Default = false,
+    Tooltip = '10x burst, 6x faster',
     Callback = function(v)
         S.coinPress = v
         if v then Tasks.coinPress = task.spawn(pressCoins)
@@ -743,8 +949,9 @@ ExtrasBox:AddToggle('CoinPress', {
 })
 
 ExtrasBox:AddToggle('CampfireFuel', {
-    Text = 'Auto Fuel Campfire',
+    Text = 'Auto Fuel Campfire (2 Coal)',
     Default = false,
+    Tooltip = 'Fuels with 2 coal when ≤10 fuel',
     Callback = function(v)
         S.campfireFuel = v
         if v then Tasks.campfireFuel = task.spawn(campfireRefuel)
@@ -753,7 +960,7 @@ ExtrasBox:AddToggle('CampfireFuel', {
 })
 
 ExtrasBox:AddToggle('TPGoldToChest', {
-    Text = 'TP Gold to Chest',
+    Text = 'TP Raw Gold to Chest',
     Default = false,
     Callback = function(v)
         S.tpRawGoldToChest = v
@@ -790,6 +997,38 @@ ExtrasBox:AddToggle('PickupGoldFromChest', {
     end
 })
 
+local ToolBox = Tabs.Extras:AddRightGroupbox('Auto Retool')
+
+ToolBox:AddDropdown('RetoolChoice', {
+    Values = { "God Axe", "God Pick" },
+    Default = 1,
+    Multi = false,
+    Text = 'Choose Tool',
+    Callback = function(v) 
+        S.retoolChoice = v
+        Library:Notify('Selected: ' .. v)
+    end
+})
+
+ToolBox:AddToggle('AutoRetool', {
+    Text = 'Auto Retool',
+    Default = false,
+    Tooltip = 'Auto crafts and equips chosen tool',
+    Callback = function(v)
+        S.autoRetoolEnabled = v
+        if v then
+            if S.retoolThread then pcall(task.cancel, S.retoolThread) end
+            S.retoolThread = task.spawn(autoRetoolLoop)
+        else
+            if S.retoolThread then pcall(task.cancel, S.retoolThread) end
+            S.retoolThread = nil
+        end
+    end
+})
+
+ToolBox:AddLabel('Requires Gold & Crystal Chunk')
+ToolBox:AddLabel('Will buy from shop if needed')
+
 local PerfBox = Tabs.Performance:AddLeftGroupbox('Performance Boost')
 
 PerfBox:AddLabel('Black Screen Mode')
@@ -806,6 +1045,29 @@ PerfBox:AddToggle('BlackScreen', {
         else
             disableBlackScreen()
             Library:Notify('Black Screen Disabled')
+        end
+    end
+})
+
+PerfBox:AddDivider()
+
+PerfBox:AddToggle('HideItems', {
+    Text = 'Hide Items on Floor',
+    Default = false,
+    Tooltip = 'Hides all items for better FPS',
+    Callback = function(v)
+        S.hideItems = v
+        if v then
+            hideItemsOnFloor()
+            Connections.hideItems = RunService.Heartbeat:Connect(hideItemsOnFloor)
+            Library:Notify('Items Hidden!')
+        else
+            if Connections.hideItems then 
+                Connections.hideItems:Disconnect() 
+                Connections.hideItems = nil
+            end
+            showItemsOnFloor()
+            Library:Notify('Items Visible')
         end
     end
 })
@@ -844,4 +1106,92 @@ task.spawn(function()
     if config.positions then
         S.positionList = config.positions
     end
-end)
+end)ween = nil end
+
+        local ti = TweenInfo.new(
+            duration, 
+            Enum.EasingStyle.Sine,
+            Enum.EasingDirection.InOut
+        )
+        tween = TweenService:Create(Root, ti, { CFrame = CFrame.new(targetPos) })
+
+        local completed, restartToNext, rubberbanded = false, false, false
+        local jumpOuter = false
+
+        local t0 = tick()
+        local lastPoll = t0
+        local lastPos = startPos
+        local lastDist = (lastPos - targetPos).Magnitude
+
+        tweenConn = tween.Completed:Connect(function()
+            completed = true
+            if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
+        end)
+
+        tween:Play()
+
+        while S.tween and S.isMoving and not completed do
+            task.wait(JUMP_SAMPLE_SECS)
+
+            local now = tick()
+            local elapsed = now - t0
+            local alpha = math.clamp(elapsed / duration, 0, 1)
+
+            local curPos  = Root.Position
+            local curDist = (curPos - targetPos).Magnitude
+
+            if curDist <= REACH_RADIUS then
+                completed = true
+                break
+            end
+
+            local stepJump = (curPos - lastPos).Magnitude
+            if (curDist - lastDist) >= TELEPORT_BACK_DINC or stepJump >= TELEPORT_STEP_JUMP then
+                rubberbanded = true
+            end
+
+            do
+                local expectPos = startPos:Lerp(targetPos, alpha)
+                local dev = (curPos - expectPos).Magnitude
+                if dev >= RUBBER_DEV_STUDS then
+                    local vmag = Root.AssemblyLinearVelocity.Magnitude
+                    if vmag < 1 or dev > (RUBBER_DEV_STUDS * 1.5) then
+                        rubberbanded = true
+                    end
+                end
+            end
+
+            if (now - t0) > MAX_TRAVEL_SECS or 
+               ((now - lastPoll) > NO_PROGRESS_SECS and (lastDist - curDist) < MIN_IMPROVE_STUDS) then
+                restartToNext = true
+                break
+            end
+
+            if rubberbanded then
+                if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
+                if tween then tween:Cancel(); tween = nil end
+
+                task.wait(SETTLE_SECS)
+                local serverPos = Root.Position
+                local newIndex  = nearestIndex(serverPos)
+
+                rbCount[curIndex] = (rbCount[curIndex] or 0) + 1
+                if rbCount[curIndex] >= MAX_RB_PER_NODE then
+                    rbCount[curIndex] = 0
+                    curIndex = (curIndex % #S.positionList) + 1
+                else
+                    curIndex = newIndex
+                end
+
+                task.wait(0.1)
+                jumpOuter = true
+                break
+            end
+
+            lastPoll = now
+            lastDist = curDist
+            lastPos = curPos
+        end
+
+        if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
+        if tween then tween:Cancel(); t
