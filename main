@@ -27,6 +27,9 @@ local Packets = require(RS.Modules.Packets)
 local GameUtil = require(RS.Modules.GameUtil)
 local ItemIDS = require(RS.Modules.ItemIDS)
 local ItemData = require(RS.Modules.ItemData)
+local Clock = require(RS.Modules.Clock)
+local Events = RS:WaitForChild("Events")
+local SpawnFirst = Events:WaitForChild("SpawnFirst")
 
 Player.CharacterAdded:Connect(function(char)
     Character = char
@@ -47,56 +50,38 @@ end)
 
 task.spawn(function()
     local success, result = pcall(function()
-        return loadstring(game:HttpGet("https://raw.githubusercontent.com/Zacharificy/goldfarm/main/tweens2"))()
+        return loadstring(game:HttpGet("https://raw.githubusercontent.com/Zacharificy/goldfarm/refs/heads/main/tweens2"))()
     end)
-    if success and result then config2 = result end
+    if success and result then 
+        if result.positions and type(result.positions[1]) == "table" and result.positions[1].positions then
+            config2 = {waitTime = result.waitTime or 0.01, positions = result.positions[1].positions}
+        else
+            config2 = result 
+        end
+    end
 end)
 
 local S = {
-    autoHit = false,
-    noclip = false,
-    autoEat = false,
-    tween = false,
-    pickupGold = false,
-    pickupCoal = false,
-    pickupCoins = false,
-    coinPress = false,
-    campfireFuel = false,
-    tpRawGoldToChest = false,
-    pickupGoldFromChest = false,
-    blackScreen = false,
-    fruit = "Lemon",
-    hitRadius = 200,
-    waitTime = 0.01,
-    positionList = {},
-    tweenSpeed = 16,
-    isMoving = false,
-    lastEatTime = 0,
-    chest = nil,
-    CampfireTracker = {},
-    autoRetoolEnabled = false,
-    retoolChoice = "God Pick",
-    retoolThread = nil,
-    hideItems = false,
-    hiddenItems = {},
-    selectedPath = "Path 1"
+    autoHit = false, noclip = false, autoEat = false, tween = false,
+    pickupGold = false, pickupCoal = false, pickupCoins = false,
+    coinPress = false, campfireFuel = false, tpRawGoldToChest = false,
+    pickupGoldFromChest = false, blackScreen = false, fruit = "Lemon",
+    hitRadius = 200, positionList = {}, tweenSpeed = 19, isMoving = false,
+    lastEatTime = 0, chest = nil, CampfireTracker = {}, autoRetoolEnabled = false,
+    retoolChoice = "God Pick", retoolThread = nil, hideItems = false,
+    hiddenItems = {}, selectedPath = "Path 1", autoBedSpawnEnabled = false,
+    autoSpawnConnection = nil, autoSpawnDeathConnection = nil,
+    autoSpawnRemovingConnection = nil, tweenWasActive = false,
+    autoHitWasActive = false, autoRetoolWasActive = false, died = false,
+    walkSpeed = 19
 }
-
-local HUNGER_CAP = 100
-local EAT_AT = 90
-local EAT_COOLDOWN = 1.5
 
 local CFG = {
-    GOLD_ID = 597,
-    CRYSTAL_ID = 436,
-    GOD_AXE_ID = 454,
-    GOD_PICK_ID = 132,
-    NEED_GOLD = 12,
-    NEED_CRYSTAL = 3
+    GOLD_ID = 597, CRYSTAL_ID = 436, GOD_AXE_ID = 454, GOD_PICK_ID = 132,
+    NEED_GOLD = 12, NEED_CRYSTAL = 3, HUNGER_CAP = 100, EAT_AT = 90, EAT_COOLDOWN = 1.5
 }
 
-local Connections = {}
-local Tasks = {}
+local Connections, Tasks = {}, {}
 local Cache = {
     Items = workspace:FindFirstChild("Items"),
     Resources = workspace:FindFirstChild("Resources"),
@@ -111,21 +96,42 @@ task.spawn(function()
     table.sort(fruitOptions)
 end)
 
-local function chosenName() 
-    return (S.retoolChoice == "God Axe") and "God Axe" or "God Pick" 
+local GC = getconnections or get_signal_cons
+if GC then
+    for _, v in pairs(GC(Player.Idled)) do
+        if v.Disable then v:Disable() elseif v.Disconnect then v:Disconnect() end
+    end
+else
+    local VirtualUser = game:GetService("VirtualUser")
+    Player.Idled:Connect(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
 end
 
-local function chosenCraftID() 
-    return (S.retoolChoice == "God Axe") and CFG.GOD_AXE_ID or CFG.GOD_PICK_ID 
+local function idToName(id)
+    for name, data in pairs(ItemData) do
+        if type(data) == "table" and (data.id == id or data.itemID == id) then return name end
+    end
+    for name, _id in pairs(ItemIDS) do
+        if _id == id then return name end
+    end
+    return nil
 end
 
-local function getToolbar() 
-    return (GameUtil and GameUtil.Data and GameUtil.Data.toolbar) or {} 
+local function getQuantity(name)
+    local success, data = pcall(function() return GameUtil.getData().inventory end)
+    if not success or not data then return 0 end
+    for _, v in pairs(data) do
+        if v and v.name == name then return v.quantity or 0 end
+    end
+    return 0
 end
 
-local function getEquipped() 
-    return GameUtil and GameUtil.Data and GameUtil.Data.equipped 
-end
+local function chosenName() return (S.retoolChoice == "God Axe") and "God Axe" or "God Pick" end
+local function chosenCraftID() return (S.retoolChoice == "God Axe") and CFG.GOD_AXE_ID or CFG.GOD_PICK_ID end
+local function getToolbar() return (GameUtil and GameUtil.Data and GameUtil.Data.toolbar) or {} end
+local function getEquipped() return GameUtil and GameUtil.Data and GameUtil.Data.equipped end
 
 local function toolbarFindChosenSlot()
     for slot, entry in pairs(getToolbar()) do
@@ -151,78 +157,40 @@ local function equippedIsChosen()
 end
 
 local function ensureMaterials()
-    local g = tonumber((getQuantity("Gold"))) or 0
-    local c = tonumber((getQuantity("Crystal Chunk"))) or 0
-
-    local needGold = math.max(0, CFG.NEED_GOLD - g)
-    local needCrystal = math.max(0, CFG.NEED_CRYSTAL - c)
-
-    for i = 1, needGold do
-        Packets.PurchaseFromShop.send(CFG.GOLD_ID)
-        task.wait()
-    end
-
-    for i = 1, needCrystal do
-        Packets.PurchaseFromShop.send(CFG.CRYSTAL_ID)
-        task.wait()
-    end
+    local g, c = tonumber(getQuantity("Gold")) or 0, tonumber(getQuantity("Crystal Chunk")) or 0
+    for i = 1, math.max(0, CFG.NEED_GOLD - g) do pcall(Packets.PurchaseFromShop.send, CFG.GOLD_ID) task.wait() end
+    for i = 1, math.max(0, CFG.NEED_CRYSTAL - c) do pcall(Packets.PurchaseFromShop.send, CFG.CRYSTAL_ID) task.wait() end
 end
 
 local function craftAndEquipFromHotbar()
     ensureMaterials()
-
-    Packets.CraftItem.send(chosenCraftID())
+    pcall(Packets.CraftItem.send, chosenCraftID())
     task.wait(0.5)
-
-    local t0 = os.clock()
-    local slot
-    repeat
-        slot = toolbarFindChosenSlot()
-        if slot then break end
-        task.wait(0.1)
-    until os.clock() - t0 > 3
-
-    if not slot then
-        task.wait(0.3)
-        slot = toolbarFindChosenSlot()
-    end
-
-    if slot then
-        Packets.EquipTool.send(slot)
-        return true
-    else
-        Library:Notify('Crafted, but tool not found in hotbar.')
-        return false
-    end
+    local t0, slot = os.clock()
+    repeat slot = toolbarFindChosenSlot() if slot then break end task.wait(0.1) until os.clock() - t0 > 3
+    if not slot then task.wait(0.3) slot = toolbarFindChosenSlot() end
+    if slot then pcall(Packets.EquipTool.send, slot) return true
+    else if Library then Library:Notify('Tool not found in hotbar') end return false end
 end
 
 local function autoRetoolLoop()
     while S.autoRetoolEnabled do
+        task.wait(0.5)
         if not equippedIsChosen() then
             local slot = toolbarFindChosenSlot()
-            if slot then
-                Packets.EquipTool.send(slot)
-            else
-                craftAndEquipFromHotbar()
-            end
+            if slot then pcall(Packets.EquipTool.send, slot) else pcall(craftAndEquipFromHotbar) end
         end
-        task.wait(0.5)
     end
 end
 
 local function hideItemsOnFloor()
     if not Cache.Items then return end
-    
     for _, item in ipairs(Cache.Items:GetChildren()) do
         if not S.hiddenItems[item] then
             S.hiddenItems[item] = true
             for _, part in ipairs(item:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    part.Transparency = 1
-                    part.CanCollide = false
-                elseif part:IsA("Decal") or part:IsA("Texture") then
-                    part.Transparency = 1
-                end
+                if part:IsA("BasePart") then part.Transparency = 1 part.CanCollide = false
+                elseif part:IsA("Decal") or part:IsA("Texture") then part.Transparency = 1 end
             end
         end
     end
@@ -230,61 +198,33 @@ end
 
 local function showItemsOnFloor()
     if not Cache.Items then return end
-    
     for item in pairs(S.hiddenItems) do
         if item and item.Parent then
             for _, part in ipairs(item:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    part.Transparency = 0
-                    part.CanCollide = true
-                elseif part:IsA("Decal") or part:IsA("Texture") then
-                    part.Transparency = 0
-                end
+                if part:IsA("BasePart") then part.Transparency = 0 part.CanCollide = true
+                elseif part:IsA("Decal") or part:IsA("Texture") then part.Transparency = 0 end
             end
         end
     end
     table.clear(S.hiddenItems)
 end
 
-local function setupAntiAFK()
-    local GC = getconnections or get_signal_cons
-    if GC then
-        for _, v in pairs(GC(Player.Idled)) do
-            if v.Disable then v:Disable() elseif v.Disconnect then v:Disconnect() end
-        end
-    else
-        local VirtualUser = game:GetService("VirtualUser")
-        Player.Idled:Connect(function()
-            VirtualUser:CaptureController()
-            VirtualUser:ClickButton2(Vector2.new())
-        end)
-    end
-end
-
 local hitDebounce = false
 local function hitResources()
-    if hitDebounce or not Root.Parent then return end
+    if hitDebounce or not Root or not Root.Parent then return end
     hitDebounce = true
-    
-    local entities = {}
-    local rootPos = Root.Position
-    local radiusSq = S.hitRadius * S.hitRadius
-    
+    local entities, rootPos, radiusSq = {}, Root.Position, S.hitRadius * S.hitRadius
     if Cache.Resources then
         for _, res in ipairs(Cache.Resources:GetChildren()) do
             if res.Parent then
                 local ok, pivot = pcall(res.GetPivot, res)
-                if ok then
-                    local dist = (rootPos - pivot.Position).Magnitude
-                    if dist * dist <= radiusSq then
-                        local id = res:GetAttribute("EntityID")
-                        if id then entities[#entities + 1] = id end
-                    end
+                if ok and (rootPos - pivot.Position).Magnitude * (rootPos - pivot.Position).Magnitude <= radiusSq then
+                    local id = res:GetAttribute("EntityID")
+                    if id then entities[#entities + 1] = id end
                 end
             end
         end
     end
-    
     if #entities > 0 then pcall(Packets.SwingTool.send, entities) end
     task.delay(0.06, function() hitDebounce = false end)
 end
@@ -293,26 +233,23 @@ local function noclip()
     if Cache.Deployables then
         for _, v in ipairs(Cache.Deployables:GetChildren()) do
             local door = v:FindFirstChild("Door")
-            if door then
-                door.Transparency = S.noclip and 0.5 or 0
-                door.CanCollide = not S.noclip
-            end
+            if door then door.Transparency = S.noclip and 0.5 or 0 door.CanCollide = not S.noclip end
         end
     end
-    
     if S.noclip and Character then
         for _, part in ipairs(Character:GetDescendants()) do
-            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
-                part.CanCollide = false
-            end
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then part.CanCollide = false end
         end
     end
 end
 
 local function findFruit(name)
-    for idx, data in next, GameUtil.getData().inventory do
-        if data.name == name then return idx end
+    local success, data = pcall(function() return GameUtil.getData().inventory end)
+    if not success or not data then return nil end
+    for idx, item in pairs(data) do
+        if item and item.name == name then return idx end
     end
+    return nil
 end
 
 local function getHunger()
@@ -323,12 +260,9 @@ end
 local function autoEat()
     while S.autoEat do
         local hunger = getHunger()
-        if S.fruit and hunger and hunger <= EAT_AT and (tick() - S.lastEatTime) >= EAT_COOLDOWN then
+        if S.fruit and hunger and hunger <= CFG.EAT_AT and (tick() - S.lastEatTime) >= CFG.EAT_COOLDOWN then
             local idx = findFruit(S.fruit)
-            if idx then
-                Packets.UseBagItem.send(idx)
-                S.lastEatTime = tick()
-            end
+            if idx then pcall(Packets.UseBagItem.send, idx) S.lastEatTime = tick() end
         end
         task.wait(0.8)
     end
@@ -344,13 +278,12 @@ local function createPickup(itemName, checkChests, stateKey)
                         local id = item:GetAttribute("EntityID")
                         if id then
                             cache[item] = true
-                            for i = 1, 10 do Packets.Pickup.send(id) end
+                            for i = 1, 10 do pcall(Packets.Pickup.send, id) end
                             task.delay(0.3, function() cache[item] = nil end)
                         end
                     end
                 end
             end
-            
             if checkChests and Cache.Deployables then
                 for _, chest in ipairs(Cache.Deployables:GetChildren()) do
                     local contents = chest:FindFirstChild("Contents")
@@ -360,7 +293,7 @@ local function createPickup(itemName, checkChests, stateKey)
                                 local id = item:GetAttribute("EntityID")
                                 if id then
                                     cache[item] = true
-                                    for i = 1, 10 do Packets.Pickup.send(id) end
+                                    for i = 1, 10 do pcall(Packets.Pickup.send, id) end
                                     task.delay(0.3, function() cache[item] = nil end)
                                 end
                             end
@@ -379,18 +312,13 @@ local pickupCoins = createPickup("Coin", false, "pickupCoins")
 
 local function getDeployable(name, range)
     if not Cache.Deployables or not Root then return nil end
-    
-    local closest, closestDist = nil, range or math.huge
-    local rootPos = Root.Position
-    
+    local closest, closestDist, rootPos = nil, range or math.huge, Root.Position
     for _, v in ipairs(Cache.Deployables:GetChildren()) do
         if v.Name == name and v:IsA("Model") then
             local ok, pivot = pcall(v.GetPivot, v)
             if ok then
                 local dist = (rootPos - pivot.Position).Magnitude
-                if dist < closestDist then
-                    closest, closestDist = v, dist
-                end
+                if dist < closestDist then closest, closestDist = v, dist end
             end
         end
     end
@@ -399,12 +327,8 @@ end
 
 local function GetDeployable(name, range, multiple)
     local deployablesFolder = Cache.Deployables
-    if not deployablesFolder or not Root then
-        return multiple and {} or nil
-    end
-
+    if not deployablesFolder or not Root then return multiple and {} or nil end
     range = tonumber(range) or math.huge
-
     if multiple then
         local results = {}
         for _, v in ipairs(deployablesFolder:GetChildren()) do
@@ -412,9 +336,7 @@ local function GetDeployable(name, range, multiple)
                 local ok, pivot = pcall(function() return v:GetPivot() end)
                 if ok and pivot then
                     local dist = (Root.Position - pivot.Position).Magnitude
-                    if dist < range then
-                        table.insert(results, { deployable = v, range = dist })
-                    end
+                    if dist < range then table.insert(results, { deployable = v, range = dist }) end
                 end
             end
         end
@@ -425,47 +347,26 @@ local function GetDeployable(name, range, multiple)
     end
 end
 
-local function getQuantity(name)
-    for _, v in next, GameUtil.getData().inventory do
-        if v.name == name then return v.quantity end
-    end
-    return 0
-end
-
-local SEND_DT = 0.01
-local LOOKUP_DT = 2
-local BURST_MAX = 10
-
 local function pressCoins()
     local press, entityID, lastLookup, lastSend = nil, nil, 0, 0
-
     while S.coinPress do
         local now = os.clock()
-
-        if (not press or not press.Parent or (now - lastLookup) >= LOOKUP_DT) then
+        if (not press or not press.Parent or (now - lastLookup) >= 2) then
             press = getDeployable("Coin Press", 25)
             entityID = (press and press:GetAttribute("EntityID")) or nil
             lastLookup = now
         end
-
         if entityID then
             local goldAmt = getQuantity("Gold") or 0
-            if goldAmt > 0 and (now - lastSend) >= SEND_DT then
-                local n = math.min(goldAmt, BURST_MAX)
-                for i = 1, n do
-                    Packets.InteractStructure.send({ entityID = entityID, itemID = ItemIDS.Gold })
+            if goldAmt > 0 and (now - lastSend) >= 0.01 then
+                for i = 1, math.min(goldAmt, 10) do
+                    pcall(Packets.InteractStructure.send, { entityID = entityID, itemID = ItemIDS.Gold })
                 end
                 lastSend = now
             end
         end
-
         RunService.Heartbeat:Wait()
     end
-end
-
-local function getCampfireCapacity(campfireName)
-    local data = ItemData[campfireName]
-    return data and data.capacity or 100
 end
 
 local function getFuelBurnValue(fuelName)
@@ -473,114 +374,47 @@ local function getFuelBurnValue(fuelName)
     return data and data.fuelValue or 60
 end
 
-local function shouldRefuelCampfire(campfire, currentTime)
-    local tracked = S.CampfireTracker[campfire]
-    if not tracked then
-        return true
-    end
-    
-    local elapsed = currentTime - tracked.lastFuelTime
-    local remaining = math.max(0, tracked.fuelAmount - elapsed)
-    
-    return remaining <= 10
-end
-
-local function trackCampfireFuel(campfire, fuelName)
-    local currentTime = tick()
-    local fuelValue = getFuelBurnValue(fuelName)
-    local capacity = getCampfireCapacity(campfire.Name)
-    
-    if not S.CampfireTracker[campfire] then
-        S.CampfireTracker[campfire] = {
-            lastFuelTime = currentTime,
-            fuelAmount = fuelValue
-        }
-    else
-        local tracked = S.CampfireTracker[campfire]
-        local elapsed = currentTime - tracked.lastFuelTime
-        local currentFuel = math.max(0, tracked.fuelAmount - elapsed)
-        
-        tracked.fuelAmount = math.min(currentFuel + fuelValue, capacity)
-        tracked.lastFuelTime = currentTime
-    end
-end
-
-local function idToName(id)
-    for name, data in pairs(ItemData) do
-        if type(data) == "table" and (data.id == id or data.itemID == id) then return name end
-    end
-    for name, _id in pairs(ItemIDS) do
-        if _id == id then return name end
-    end
-    return nil
-end
-
 local function GetFuel()
-    for x, v in next, GameUtil.getData().inventory do
-        if ItemData[v.name] and ItemData[v.name]["fuels"] then
-            return ItemIDS[v.name]
-        end
+    local success, data = pcall(function() return GameUtil.getData().inventory end)
+    if not success or not data then return nil end
+    for x, v in pairs(data) do
+        if v and v.name and ItemData[v.name] and ItemData[v.name]["fuels"] then return ItemIDS[v.name] end
     end
     return nil
 end
 
 local function campfireRefuel()
-    local CHECK_INTERVAL = 1
-    local REFUEL_THRESHOLD = 10
-    
     while S.campfireFuel do
-        task.wait(CHECK_INTERVAL)
-        
-        local currentTime = tick()
-        local campfires = GetDeployable("Campfire", 40, true) or {}
-        
+        task.wait(1)
+        local currentTime, campfires = tick(), GetDeployable("Campfire", 40, true) or {}
         for trackedCampfire in pairs(S.CampfireTracker) do
-            if not trackedCampfire.Parent then
-                S.CampfireTracker[trackedCampfire] = nil
-            end
+            if not trackedCampfire.Parent then S.CampfireTracker[trackedCampfire] = nil end
         end
-        
         for _, rec in ipairs(campfires) do
-            local campfire = rec.deployable
-            
-            local tracked = S.CampfireTracker[campfire]
-            local remainingFuel = 0
-            
+            local campfire, tracked, remainingFuel = rec.deployable, S.CampfireTracker[campfire], 0
             if tracked then
                 local elapsed = currentTime - tracked.lastFuelTime
                 remainingFuel = math.max(0, tracked.fuelAmount - elapsed)
             end
-            
-            if remainingFuel <= REFUEL_THRESHOLD then
+            if remainingFuel <= 10 then
                 local fuel = GetFuel()
                 if fuel then
                     local entityID = campfire:GetAttribute("EntityID")
                     if entityID then
                         local fuelName = idToName(fuel)
                         if not fuelName then continue end
-                        
                         local fuelValue = getFuelBurnValue(fuelName)
-                        
                         for i = 1, 2 do
-                            Packets.InteractStructure.send({
-                                entityID = entityID,
-                                itemID = fuel
-                            })
+                            pcall(Packets.InteractStructure.send, { entityID = entityID, itemID = fuel })
                             task.wait(0.05)
                         end
-                        
-                        S.CampfireTracker[campfire] = {
-                            lastFuelTime = currentTime,
-                            fuelAmount = fuelValue * 2
-                        }
-                        
+                        S.CampfireTracker[campfire] = { lastFuelTime = currentTime, fuelAmount = fuelValue * 2 }
                         task.wait(0.2)
                     end
                 end
             end
         end
     end
-    
     table.clear(S.CampfireTracker)
 end
 
@@ -590,30 +424,26 @@ local function tpRawGold()
             S.chest = getDeployable("Chest", 100)
             if not S.chest then task.wait(0.3) continue end
         end
-        
-        local inventory = GameUtil.getData().inventory
-        for idx, data in pairs(inventory) do
-            if data.name == "Raw Gold" and data.quantity > 0 then
-                local dropAmount = math.min(data.quantity, 100)
-                for i = 1, dropAmount do
-                    Packets.DropBagItem.send(idx, 1)
-                end
-                
-                task.wait(0.02)
-                
-                if Cache.Items then
-                    for _, item in ipairs(Cache.Items:GetChildren()) do
-                        if item.Name == "Raw Gold" then
-                            local id = item:GetAttribute("EntityID")
-                            if id and S.chest and S.chest.Parent then
-                                Packets.ForceInteract.send(id)
-                                pcall(item.PivotTo, item, S.chest:GetPivot() * CFrame.new(0, 2, 0))
-                                Packets.ForceInteract.send()
+        local success, inventory = pcall(function() return GameUtil.getData().inventory end)
+        if success and inventory then
+            for idx, data in pairs(inventory) do
+                if data and data.name == "Raw Gold" and data.quantity > 0 then
+                    for i = 1, math.min(data.quantity, 100) do pcall(Packets.DropBagItem.send, idx, 1) end
+                    task.wait(0.02)
+                    if Cache.Items then
+                        for _, item in ipairs(Cache.Items:GetChildren()) do
+                            if item.Name == "Raw Gold" then
+                                local id = item:GetAttribute("EntityID")
+                                if id and S.chest and S.chest.Parent then
+                                    pcall(Packets.ForceInteract.send, id)
+                                    pcall(item.PivotTo, item, S.chest:GetPivot() * CFrame.new(0, 2, 0))
+                                    pcall(Packets.ForceInteract.send)
+                                end
                             end
                         end
                     end
+                    break
                 end
-                break
             end
         end
         RunService.Heartbeat:Wait()
@@ -626,15 +456,12 @@ local function pickupGoldFromChest()
             S.chest = getDeployable("Chest", 100)
             if not S.chest then task.wait(0.5) continue end
         end
-        
         local contents = S.chest:FindFirstChild("Contents")
         if contents then
             for _, item in ipairs(contents:GetChildren()) do
                 if item.Name == "Gold" then
                     local id = item:GetAttribute("EntityID")
-                    if id then
-                        for i = 1, 10 do Packets.Pickup.send(id) end
-                    end
+                    if id then for i = 1, 10 do pcall(Packets.Pickup.send, id) end end
                 end
             end
         end
@@ -642,8 +469,7 @@ local function pickupGoldFromChest()
     end
 end
 
-local blackScreenGui = nil
-local originalLighting = {}
+local blackScreenGui, originalLighting = nil, {}
 
 local function enableBlackScreen()
     if not blackScreenGui then
@@ -651,76 +477,123 @@ local function enableBlackScreen()
         blackScreenGui.Name = "BlackScreenOptimizer"
         blackScreenGui.IgnoreGuiInset = true
         blackScreenGui.ResetOnSpawn = false
-        
         local frame = Instance.new("Frame")
         frame.Size = UDim2.new(1, 0, 1, 0)
         frame.BackgroundColor3 = Color3.new(0, 0, 0)
         frame.BorderSizePixel = 0
         frame.Parent = blackScreenGui
-        
         blackScreenGui.Parent = Player:WaitForChild("PlayerGui")
     end
-    
     originalLighting = {
-        Brightness = Lighting.Brightness,
-        GlobalShadows = Lighting.GlobalShadows,
-        OutdoorAmbient = Lighting.OutdoorAmbient,
-        Ambient = Lighting.Ambient,
+        Brightness = Lighting.Brightness, GlobalShadows = Lighting.GlobalShadows,
+        OutdoorAmbient = Lighting.OutdoorAmbient, Ambient = Lighting.Ambient,
     }
-    
     Lighting.Brightness = 0
     Lighting.GlobalShadows = false
     Lighting.OutdoorAmbient = Color3.new(0, 0, 0)
     Lighting.Ambient = Color3.new(0, 0, 0)
-    
     for _, effect in pairs(Lighting:GetChildren()) do
         if effect:IsA("PostEffect") then effect.Enabled = false end
     end
 end
 
 local function disableBlackScreen()
-    if blackScreenGui then
-        blackScreenGui:Destroy()
-        blackScreenGui = nil
-    end
-    
+    if blackScreenGui then blackScreenGui:Destroy() blackScreenGui = nil end
     if originalLighting.Brightness then
         Lighting.Brightness = originalLighting.Brightness
         Lighting.GlobalShadows = originalLighting.GlobalShadows
         Lighting.OutdoorAmbient = originalLighting.OutdoorAmbient
         Lighting.Ambient = originalLighting.Ambient
     end
-    
     for _, effect in pairs(Lighting:GetChildren()) do
         if effect:IsA("PostEffect") then effect.Enabled = true end
     end
 end
 
-local tween = nil
-local tweenConn = nil
+local function waitForGameLoad()
+    local PlayerGui = Player:WaitForChild("PlayerGui")
+    local SpawnGui = PlayerGui:WaitForChild("SpawnGui", 10)
+    if not SpawnGui then return false end
+    return true, SpawnGui, SpawnFirst
+end
+
+local function autoSpawn()
+    if Player:GetAttribute("hasSpawned") then return end
+    local ok, SpawnGui, SpawnFirst = waitForGameLoad()
+    if not ok then return end
+    local waited = 0
+    while not SpawnGui.Enabled and waited < 5 do task.wait(0.1) waited = waited + 0.1 end
+    if not SpawnGui.Enabled then return end
+    task.wait(1.5)
+    if Player:GetAttribute("hasSpawned") then return end
+    
+    if getconnections then
+        local bedButton = SpawnGui:FindFirstChild("Customization")
+        if bedButton then bedButton = bedButton:FindFirstChild("BedButton") end
+        if bedButton then
+            local clicked = false
+            for _, conn in pairs(getconnections(bedButton.Activated)) do
+                if conn.Function and conn.Enabled then
+                    local succ = pcall(function() conn:Fire() end)
+                    if succ then clicked = true task.wait(0.5) break end
+                end
+            end
+            if not clicked then
+                for _, conn in pairs(getconnections(bedButton.MouseButton1Click)) do
+                    if conn.Function and conn.Enabled then
+                        local succ = pcall(function() conn:Fire() end)
+                        if succ then clicked = true task.wait(0.5) break end
+                    end
+                end
+            end
+            if clicked then
+                task.wait(0.5)
+                if Player:GetAttribute("hasSpawned") then return end
+            end
+        end
+    end
+
+    Player:SetAttribute("hasSpawned", false)
+    task.wait(0.3)
+    local success, result1, result2 = pcall(function() return SpawnFirst:InvokeServer(true) end)
+    if success and result1 then
+        Player:SetAttribute("hasSpawned", true)
+        if result2 then GameUtil.Data.lastSpawnFromBed = result2 end
+        SpawnGui.Enabled = false
+        local PG = Player:WaitForChild("PlayerGui")
+        local MainGui = PG:FindFirstChild("MainGui")
+        if MainGui then MainGui.Enabled = true end
+        local Topbar = PG:FindFirstChild("Topbar")
+        if Topbar then Topbar.Enabled = true end
+        local cam = workspace.CurrentCamera
+        cam.CameraType = Enum.CameraType.Custom
+        local char = Player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then cam.CameraSubject = hum end
+    end
+end
+
+local tween, tweenConn = nil, nil
 
 local function startTweening()
     if #S.positionList == 0 then
-        Library:Notify('No positions available')
+        if Library then Library:Notify('No positions available') end
         return
     end
 
-    local REACH_RADIUS = 5
-    local MIN_IMPROVE_STUDS = 0.5
-    local NO_PROGRESS_SECS = 3
-    local TELEPORT_BACK_DINC = 12
-    local TELEPORT_STEP_JUMP = 20
-    local RUBBER_DEV_STUDS = 8
-    local SETTLE_SECS = 0.5
-    local MAX_RB_PER_NODE = 4
-    local JUMP_SAMPLE_SECS = 0.15
+    if not Root or not Root.Parent then
+        if Library then Library:Notify('Character not ready') end
+        return
+    end
 
     local function nearestIndex(fromPos)
+        if not fromPos then return 1 end
         local bestI, bestD = 1, math.huge
         for j = 1, #S.positionList do
             local p = S.positionList[j]
-            if p and p.X and p.Y and p.Z then
-                local d = (fromPos - Vector3.new(p.X, p.Y, p.Z)).Magnitude
+            if p and type(p) == "table" and p.X and p.Y and p.Z then
+                local x, y, z = tonumber(p.X) or 0, tonumber(p.Y) or 0, tonumber(p.Z) or 0
+                local d = (fromPos - Vector3.new(x, y, z)).Magnitude
                 if d < bestD then bestI, bestD = j, d end
             end
         end
@@ -728,54 +601,142 @@ local function startTweening()
     end
 
     local curIndex = nearestIndex(Root.Position)
-    local fails = table.create(#S.positionList, 0)
-    local rbCount = table.create(#S.positionList, 0)
 
     while S.tween and S.isMoving do
-        if curIndex < 1 or curIndex > #S.positionList then
-            curIndex = 1
-        end
+        if not Root or not Root.Parent then break end
+        if curIndex < 1 or curIndex > #S.positionList then curIndex = 1 end
 
         local pos = S.positionList[curIndex]
-        if not (pos and pos.X and pos.Y and pos.Z) then
-            Library:Notify(("Invalid pos @ %d"):format(curIndex))
+        if not (pos and type(pos) == "table" and pos.X and pos.Y and pos.Z) then
             curIndex = (curIndex % #S.positionList) + 1
             task.wait(0.05)
             continue
         end
 
-        local targetPos = Vector3.new(pos.X, pos.Y, pos.Z)
-        local startPos = Root.Position
-        local dist = (startPos - targetPos).Magnitude
-        local speed = S.tweenSpeed
-        local MAX_TRAVEL_SECS = math.max(20, dist / (speed * 0.5))
-        local duration = math.max(0.1, dist / speed)
-
-        if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
-        if tween then tween:Cancel(); tween = nil end
-
-        if jumpOuter then continue end
-
-        if restartToNext then
-            fails[curIndex] = (fails[curIndex] or 0) + 1
-            if fails[curIndex] >= 3 then
-                fails[curIndex] = 0
-            end
+        local x, y, z = tonumber(pos.X), tonumber(pos.Y), tonumber(pos.Z)
+        if not (x and y and z) then
             curIndex = (curIndex % #S.positionList) + 1
-            task.wait(0.15)
+            task.wait(0.05)
             continue
         end
 
-        fails[curIndex] = 0
-        rbCount[curIndex] = 0
-        curIndex = (curIndex % #S.positionList) + 1
+        local targetPos = Vector3.new(x, y, z)
+        local startPos = Root.Position
+        local dist = (startPos - targetPos).Magnitude
+        local speed = tonumber(S.walkSpeed) or 19
+        local duration = math.max(0.1, dist / speed)
+
+        if tweenConn then tweenConn:Disconnect() tweenConn = nil end
+        if tween then tween:Cancel() tween = nil end
+
+        local ti = TweenInfo.new(duration, Enum.EasingStyle.Linear)
+        tween = TweenService:Create(Root, ti, { CFrame = CFrame.new(targetPos) })
+
+        local completed = false
+        tweenConn = tween.Completed:Connect(function()
+            completed = true
+            if tweenConn then tweenConn:Disconnect() tweenConn = nil end
+        end)
+
+        tween:Play()
+
+        local checkInterval = 0.15
+        local maxChecks = math.ceil(duration / checkInterval) + 5
+        local checks = 0
         
-        task.wait(0.05)
+        while S.tween and S.isMoving and not completed and checks < maxChecks do
+            task.wait(checkInterval)
+            checks = checks + 1
+            
+            if not Root or not Root.Parent then break end
+            
+            local curDist = (Root.Position - targetPos).Magnitude
+            if curDist <= 3 then
+                completed = true
+                break
+            end
+        end
+
+        if tweenConn then tweenConn:Disconnect() tweenConn = nil end
+        if tween then tween:Cancel() tween = nil end
+
+        curIndex = (curIndex % #S.positionList) + 1
     end
     
-    task.wait(0.02)
-    if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
-    if tween then tween:Cancel(); tween = nil end
+    if tweenConn then tweenConn:Disconnect() tweenConn = nil end
+    if tween then tween:Cancel() tween = nil end
+end
+
+local function setupAutoBedSpawn()
+    if S.autoSpawnConnection then S.autoSpawnConnection:Disconnect() S.autoSpawnConnection = nil end
+    if S.autoSpawnDeathConnection then S.autoSpawnDeathConnection:Disconnect() S.autoSpawnDeathConnection = nil end
+    if S.autoSpawnRemovingConnection then S.autoSpawnRemovingConnection:Disconnect() S.autoSpawnRemovingConnection = nil end
+    
+    S.autoSpawnRemovingConnection = Player.CharacterRemoving:Connect(function()
+        Player:SetAttribute("hasSpawned", false)
+        S.tweenWasActive = S.tween
+        S.autoHitWasActive = S.autoHit
+        S.autoRetoolWasActive = S.autoRetoolEnabled
+        S.died = true
+    end)
+    
+    local function setupDeathDetection()
+        if Player.Character then
+            local humanoid = Player.Character:FindFirstChild("Humanoid")
+            if humanoid then
+                if S.autoSpawnDeathConnection then S.autoSpawnDeathConnection:Disconnect() end
+                S.autoSpawnDeathConnection = humanoid.Died:Connect(function()
+                    Player:SetAttribute("hasSpawned", false)
+                    S.tweenWasActive = S.tween
+                    S.autoHitWasActive = S.autoHit
+                    S.autoRetoolWasActive = S.autoRetoolEnabled
+                    S.died = true
+                end)
+            end
+        end
+    end
+    
+    S.autoSpawnConnection = Player.CharacterAdded:Connect(function(char)
+        Character = char
+        Humanoid = char:WaitForChild("Humanoid")
+        Root = char:WaitForChild("HumanoidRootPart")
+        Humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, false)
+        Player:SetAttribute("hasSpawned", false)
+        setupDeathDetection()
+        task.wait(0.5)
+        
+        if S.autoBedSpawnEnabled then
+            task.spawn(autoSpawn)
+            task.wait(3)
+            
+            if S.died then
+                if S.autoRetoolWasActive then
+                    S.autoRetoolEnabled = true
+                    if S.retoolThread then pcall(task.cancel, S.retoolThread) end
+                    task.wait(0.5)
+                    pcall(craftAndEquipFromHotbar)
+                    task.wait(0.5)
+                    S.retoolThread = task.spawn(autoRetoolLoop)
+                end
+                
+                if S.autoHitWasActive then
+                    S.autoHit = true
+                    Connections.autoHit = RunService.Heartbeat:Connect(hitResources)
+                end
+                
+                if S.tweenWasActive then
+                    task.wait(1)
+                    S.tween = true
+                    S.isMoving = true
+                    Tasks.tween = task.spawn(startTweening)
+                end
+                S.died = false
+            end
+        end
+    end)
+    
+    setupDeathDetection()
+    Player:SetAttribute("hasSpawned", false)
 end
 
 repeat task.wait(0.1) until Library
@@ -797,21 +758,13 @@ local Tabs = {
 
 local MainBox = Tabs.Main:AddLeftGroupbox('Main')
 
-MainBox:AddButton('Anti-AFK', function()
-    setupAntiAFK()
-    Library:Notify('Anti-AFK enabled!')
-end)
-
 MainBox:AddToggle('AutoHit', {
     Text = 'Auto Hit',
     Default = false,
     Callback = function(v)
         S.autoHit = v
-        if v then
-            Connections.autoHit = RunService.Heartbeat:Connect(hitResources)
-        else
-            if Connections.autoHit then Connections.autoHit:Disconnect() end
-        end
+        if v then Connections.autoHit = RunService.Heartbeat:Connect(hitResources)
+        else if Connections.autoHit then Connections.autoHit:Disconnect() end end
     end
 })
 
@@ -821,22 +774,28 @@ MainBox:AddToggle('Noclip', {
     Callback = function(v)
         S.noclip = v
         noclip()
-        if v then
-            Connections.noclip = RunService.Heartbeat:Connect(noclip)
-        else
-            if Connections.noclip then Connections.noclip:Disconnect() end
-            noclip()
-        end
+        if v then Connections.noclip = RunService.Heartbeat:Connect(noclip)
+        else if Connections.noclip then Connections.noclip:Disconnect() end noclip() end
     end
 })
 
-MainBox:AddDropdown('FruitSelect', {
+local fruitDropdown = MainBox:AddDropdown('FruitSelect', {
     Values = fruitOptions,
     Default = 1,
     Multi = false,
     Text = 'Select Fruit',
     Callback = function(v) S.fruit = v end
 })
+
+task.spawn(function()
+    task.wait(2)
+    for i, fruit in ipairs(fruitOptions) do
+        if fruit == "Lemon" then
+            fruitDropdown:SetValue(fruit)
+            break
+        end
+    end
+end)
 
 MainBox:AddToggle('AutoEat', {
     Text = 'Auto Eat',
@@ -850,9 +809,6 @@ MainBox:AddToggle('AutoEat', {
 
 local TweenBox = Tabs.Main:AddRightGroupbox('Tweening')
 
-TweenBox:AddLabel('YAKK TWEEN STARTS AT MID')
-TweenBox:AddDivider()
-
 TweenBox:AddDropdown('PathSelect', {
     Values = { "Path 1", "Draksies" },
     Default = 1,
@@ -860,11 +816,7 @@ TweenBox:AddDropdown('PathSelect', {
     Text = 'Select Path',
     Callback = function(v) 
         S.selectedPath = v
-        if v == "Path 1" then
-            S.positionList = config.positions or {}
-        else
-            S.positionList = config2.positions or {}
-        end
+        S.positionList = v == "Path 1" and (config.positions or {}) or (config2.positions or {})
         Library:Notify('Switched to ' .. v)
     end
 })
@@ -877,10 +829,12 @@ TweenBox:AddToggle('Tween', {
         S.isMoving = v
         if v then
             task.wait(0.5)
-            if S.selectedPath == "Path 1" then
-                S.positionList = config.positions or {}
-            else
-                S.positionList = config2.positions or {}
+            S.positionList = S.selectedPath == "Path 1" and (config.positions or {}) or (config2.positions or {})
+            if #S.positionList == 0 then
+                Library:Notify('No positions loaded')
+                S.tween = false
+                S.isMoving = false
+                return
             end
             Tasks.tween = task.spawn(startTweening)
         else
@@ -893,14 +847,12 @@ TweenBox:AddToggle('Tween', {
 
 TweenBox:AddSlider('Speed', {
     Text = 'Tween Speed',
-    Default = 19.6,
+    Default = 19,
     Min = 5,
-    Max = 50,
+    Max = 30,
     Rounding = 1,
     Compact = false,
-    Callback = function(v)
-        S.tweenSpeed = v
-    end
+    Callback = function(v) S.walkSpeed = v end
 })
 
 local PickupBox = Tabs.Main:AddLeftGroupbox('Instant Pickup')
@@ -938,9 +890,8 @@ PickupBox:AddToggle('PickupCoins', {
 local ExtrasBox = Tabs.Extras:AddLeftGroupbox('Extras')
 
 ExtrasBox:AddToggle('CoinPress', {
-    Text = 'Auto Coin Press (Fast)',
+    Text = 'Auto Coin Press',
     Default = false,
-    Tooltip = '10x burst, 6x faster',
     Callback = function(v)
         S.coinPress = v
         if v then Tasks.coinPress = task.spawn(pressCoins)
@@ -949,9 +900,8 @@ ExtrasBox:AddToggle('CoinPress', {
 })
 
 ExtrasBox:AddToggle('CampfireFuel', {
-    Text = 'Auto Fuel Campfire (2 Coal)',
+    Text = 'Auto Fuel Campfire',
     Default = false,
-    Tooltip = 'Fuels with 2 coal when ≤10 fuel',
     Callback = function(v)
         S.campfireFuel = v
         if v then Tasks.campfireFuel = task.spawn(campfireRefuel)
@@ -1001,7 +951,7 @@ local ToolBox = Tabs.Extras:AddRightGroupbox('Auto Retool')
 
 ToolBox:AddDropdown('RetoolChoice', {
     Values = { "God Axe", "God Pick" },
-    Default = 1,
+    Default = 2,
     Multi = false,
     Text = 'Choose Tool',
     Callback = function(v) 
@@ -1013,7 +963,6 @@ ToolBox:AddDropdown('RetoolChoice', {
 ToolBox:AddToggle('AutoRetool', {
     Text = 'Auto Retool',
     Default = false,
-    Tooltip = 'Auto crafts and equips chosen tool',
     Callback = function(v)
         S.autoRetoolEnabled = v
         if v then
@@ -1026,57 +975,65 @@ ToolBox:AddToggle('AutoRetool', {
     end
 })
 
-ToolBox:AddLabel('Requires Gold & Crystal Chunk')
-ToolBox:AddLabel('Will buy from shop if needed')
+local SpawnBox = Tabs.Extras:AddLeftGroupbox('Auto Bed Spawn')
 
-local PerfBox = Tabs.Performance:AddLeftGroupbox('Performance Boost')
-
-PerfBox:AddLabel('Black Screen Mode')
-
-PerfBox:AddToggle('BlackScreen', {
-    Text = 'Enable Black Screen',
+SpawnBox:AddToggle('AutoBedSpawn', {
+    Text = 'Enable Auto Bed Spawn',
     Default = false,
-    Tooltip = 'Covers screen with black overlay',
     Callback = function(v)
-        S.blackScreen = v
+        S.autoBedSpawnEnabled = v
         if v then
-            enableBlackScreen()
-            Library:Notify('Black Screen Enabled!')
+            setupAutoBedSpawn()
+            Library:Notify('Auto Bed Spawn Enabled')
         else
-            disableBlackScreen()
-            Library:Notify('Black Screen Disabled')
+            if S.autoSpawnConnection then S.autoSpawnConnection:Disconnect() S.autoSpawnConnection = nil end
+            if S.autoSpawnDeathConnection then S.autoSpawnDeathConnection:Disconnect() S.autoSpawnDeathConnection = nil end
+            if S.autoSpawnRemovingConnection then S.autoSpawnRemovingConnection:Disconnect() S.autoSpawnRemovingConnection = nil end
+            Library:Notify('Auto Bed Spawn Disabled')
         end
     end
 })
 
-PerfBox:AddDivider()
+local PerfBox = Tabs.Performance:AddLeftGroupbox('Performance Boost')
+
+PerfBox:AddToggle('BlackScreen', {
+    Text = 'Enable Black Screen',
+    Default = false,
+    Callback = function(v)
+        S.blackScreen = v
+        if v then enableBlackScreen() Library:Notify('Black Screen Enabled')
+        else disableBlackScreen() Library:Notify('Black Screen Disabled') end
+    end
+})
 
 PerfBox:AddToggle('HideItems', {
     Text = 'Hide Items on Floor',
     Default = false,
-    Tooltip = 'Hides all items for better FPS',
     Callback = function(v)
         S.hideItems = v
         if v then
             hideItemsOnFloor()
             Connections.hideItems = RunService.Heartbeat:Connect(hideItemsOnFloor)
-            Library:Notify('Items Hidden!')
+            Library:Notify('Items Hidden')
         else
-            if Connections.hideItems then 
-                Connections.hideItems:Disconnect() 
-                Connections.hideItems = nil
-            end
+            if Connections.hideItems then Connections.hideItems:Disconnect() Connections.hideItems = nil end
             showItemsOnFloor()
             Library:Notify('Items Visible')
         end
     end
 })
 
-PerfBox:AddDivider()
-PerfBox:AddLabel('Benefits:')
-PerfBox:AddLabel('• Massive FPS increase')
-PerfBox:AddLabel('• Reduced GPU usage')
-PerfBox:AddLabel('• Lower CPU overhead')
+local UIBox = Tabs['UI Settings']:AddRightGroupbox('Script Control')
+
+UIBox:AddButton({
+    Text = 'Unload Script',
+    Func = function()
+        Library:Notify('Unloading...')
+        task.wait(1)
+        Library:Unload()
+    end,
+    DoubleClick = false
+})
 
 ThemeManager:SetLibrary(Library)
 SaveManager:SetLibrary(Library)
@@ -1088,110 +1045,31 @@ ThemeManager:ApplyToTab(Tabs['UI Settings'])
 
 Library:OnUnload(function()
     Library.Unloaded = true
-    if S.blackScreen then
-        disableBlackScreen()
+    
+    if S.autoBedSpawnEnabled then
+        if S.autoSpawnConnection then S.autoSpawnConnection:Disconnect() end
+        if S.autoSpawnDeathConnection then S.autoSpawnDeathConnection:Disconnect() end
+        if S.autoSpawnRemovingConnection then S.autoSpawnRemovingConnection:Disconnect() end
     end
-    if tween then
-        tween:Cancel()
+    
+    if S.blackScreen then disableBlackScreen() end
+    if tween then tween:Cancel() end
+    if tweenConn then tweenConn:Disconnect() end
+    
+    for _, conn in pairs(Connections) do
+        if conn and conn.Disconnect then pcall(conn.Disconnect, conn) end
     end
-    if tweenConn then
-        tweenConn:Disconnect()
+    
+    for _, task in pairs(Tasks) do
+        if task then pcall(task.cancel, task) end
     end
 end)
 
-Library:Notify('Gold Farm Hub loaded!')
+Library:Notify('Gold Farm Hub loaded')
 
 task.spawn(function()
-    task.wait(2)
-    if config.positions then
-        S.positionList = config.positions
+    task.wait(3)
+    if config.positions and #config.positions > 0 then 
+        S.positionList = config.positions 
     end
-end)ween = nil end
-
-        local ti = TweenInfo.new(
-            duration, 
-            Enum.EasingStyle.Sine,
-            Enum.EasingDirection.InOut
-        )
-        tween = TweenService:Create(Root, ti, { CFrame = CFrame.new(targetPos) })
-
-        local completed, restartToNext, rubberbanded = false, false, false
-        local jumpOuter = false
-
-        local t0 = tick()
-        local lastPoll = t0
-        local lastPos = startPos
-        local lastDist = (lastPos - targetPos).Magnitude
-
-        tweenConn = tween.Completed:Connect(function()
-            completed = true
-            if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
-        end)
-
-        tween:Play()
-
-        while S.tween and S.isMoving and not completed do
-            task.wait(JUMP_SAMPLE_SECS)
-
-            local now = tick()
-            local elapsed = now - t0
-            local alpha = math.clamp(elapsed / duration, 0, 1)
-
-            local curPos  = Root.Position
-            local curDist = (curPos - targetPos).Magnitude
-
-            if curDist <= REACH_RADIUS then
-                completed = true
-                break
-            end
-
-            local stepJump = (curPos - lastPos).Magnitude
-            if (curDist - lastDist) >= TELEPORT_BACK_DINC or stepJump >= TELEPORT_STEP_JUMP then
-                rubberbanded = true
-            end
-
-            do
-                local expectPos = startPos:Lerp(targetPos, alpha)
-                local dev = (curPos - expectPos).Magnitude
-                if dev >= RUBBER_DEV_STUDS then
-                    local vmag = Root.AssemblyLinearVelocity.Magnitude
-                    if vmag < 1 or dev > (RUBBER_DEV_STUDS * 1.5) then
-                        rubberbanded = true
-                    end
-                end
-            end
-
-            if (now - t0) > MAX_TRAVEL_SECS or 
-               ((now - lastPoll) > NO_PROGRESS_SECS and (lastDist - curDist) < MIN_IMPROVE_STUDS) then
-                restartToNext = true
-                break
-            end
-
-            if rubberbanded then
-                if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
-                if tween then tween:Cancel(); tween = nil end
-
-                task.wait(SETTLE_SECS)
-                local serverPos = Root.Position
-                local newIndex  = nearestIndex(serverPos)
-
-                rbCount[curIndex] = (rbCount[curIndex] or 0) + 1
-                if rbCount[curIndex] >= MAX_RB_PER_NODE then
-                    rbCount[curIndex] = 0
-                    curIndex = (curIndex % #S.positionList) + 1
-                else
-                    curIndex = newIndex
-                end
-
-                task.wait(0.1)
-                jumpOuter = true
-                break
-            end
-
-            lastPoll = now
-            lastDist = curDist
-            lastPos = curPos
-        end
-
-        if tweenConn then tweenConn:Disconnect(); tweenConn = nil end
-        if tween then tween:Cancel(); t
+end)
