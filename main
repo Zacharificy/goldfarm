@@ -629,7 +629,12 @@ local function startTweening()
         if tweenConn then tweenConn:Disconnect() tweenConn = nil end
         if tween then tween:Cancel() tween = nil end
 
-        local ti = TweenInfo.new(duration, Enum.EasingStyle.Linear)
+        -- Use Quad easing for smoother acceleration/deceleration
+        local ti = TweenInfo.new(
+            duration, 
+            Enum.EasingStyle.Quad,
+            Enum.EasingDirection.InOut
+        )
         tween = TweenService:Create(Root, ti, { CFrame = CFrame.new(targetPos) })
 
         local completed = false
@@ -640,9 +645,12 @@ local function startTweening()
 
         tween:Play()
 
-        local checkInterval = 0.15
-        local maxChecks = math.ceil(duration / checkInterval) + 5
+        -- Improved progress checking with more frequent updates
+        local checkInterval = 0.1
+        local maxChecks = math.ceil(duration / checkInterval) + 10
         local checks = 0
+        local stuckCounter = 0
+        local lastPosition = Root.Position
         
         while S.tween and S.isMoving and not completed and checks < maxChecks do
             task.wait(checkInterval)
@@ -650,16 +658,35 @@ local function startTweening()
             
             if not Root or not Root.Parent then break end
             
+            -- Check if we've reached the target
             local curDist = (Root.Position - targetPos).Magnitude
-            if curDist <= 3 then
+            if curDist <= 4 then
                 completed = true
                 break
             end
+            
+            -- Detect if character is stuck (not moving)
+            local movementDelta = (Root.Position - lastPosition).Magnitude
+            if movementDelta < 0.5 then
+                stuckCounter = stuckCounter + 1
+                if stuckCounter >= 3 then
+                    -- Skip to next waypoint if stuck
+                    completed = true
+                    break
+                end
+            else
+                stuckCounter = 0
+            end
+            
+            lastPosition = Root.Position
         end
 
         if tweenConn then tweenConn:Disconnect() tweenConn = nil end
         if tween then tween:Cancel() tween = nil end
 
+        -- Brief pause between waypoints for stability
+        task.wait(0.05)
+        
         curIndex = (curIndex % #S.positionList) + 1
     end
     
